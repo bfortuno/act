@@ -8,7 +8,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import ee_transforms
-from constants import PUPPET_GRIPPER_POSITION_NORMALIZE_FN, SIM_TASK_CONFIGS
+from constants import (
+    CAMERA_HEIGHT,
+    CAMERA_WIDTH,
+    PUPPET_GRIPPER_POSITION_NORMALIZE_FN,
+    SIM_TASK_CONFIGS,
+)
 from ee_sim_env import make_ee_sim_env
 from scripted_policy import InsertionPolicy, PickAndTransferPolicy
 from sim_env import BOX_POSE, make_sim_env
@@ -23,7 +28,7 @@ def save_task_space_episode(
 
     /observations/qpos  (episode_len, 16)  achieved EE pose  [xyz, quat_wxyz, grip] x2
     /action             (episode_len, 16)  commanded EE target (scripted policy output)
-    /observations/images/<cam>  (episode_len, 480, 640, 3) uint8
+    /observations/images/<cam>  (episode_len, H, W, 3) uint8  (H, W from the rendered frames)
     No qvel. Rotation representation stored is raw quaternion; the dataset loader converts
     to quat / rpy / rot6d and to absolute / delta / relative at train time.
     """
@@ -46,6 +51,8 @@ def save_task_space_episode(
             [episode[t].observation["images"][cam_name] for t in range(max_timesteps)]
         )
 
+    cam_h, cam_w = data_dict[f"/observations/images/{camera_names[0]}"].shape[1:3]
+
     t0 = time.time()
     dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}")
     with h5py.File(dataset_path + ".hdf5", "w", rdcc_nbytes=1024**2 * 2) as root:
@@ -56,7 +63,10 @@ def save_task_space_episode(
         image = obs.create_group("images")
         for cam_name in camera_names:
             image.create_dataset(
-                cam_name, (max_timesteps, 480, 640, 3), dtype="uint8", chunks=(1, 480, 640, 3)
+                cam_name,
+                (max_timesteps, cam_h, cam_w, 3),
+                dtype="uint8",
+                chunks=(1, cam_h, cam_w, 3),
             )
         obs.create_dataset("qpos", (max_timesteps, ee_transforms.CANONICAL_DIM))
         root.create_dataset("action", (max_timesteps, ee_transforms.CANONICAL_DIM))
@@ -90,8 +100,12 @@ def main(args):
     if not os.path.isdir(dataset_dir):
         os.makedirs(dataset_dir, exist_ok=True)
 
-    episode_len = SIM_TASK_CONFIGS[task_name]["episode_len"]
-    camera_names = SIM_TASK_CONFIGS[task_name]["camera_names"]
+    task_config = SIM_TASK_CONFIGS[task_name]
+    episode_len = task_config["episode_len"]
+    camera_names = task_config["camera_names"]
+    # resolution priority: CLI flag > per-task config > global default
+    camera_height = args.get("camera_height") or task_config.get("camera_height", CAMERA_HEIGHT)
+    camera_width = args.get("camera_width") or task_config.get("camera_width", CAMERA_WIDTH)
     if task_name == "sim_transfer_cube_scripted":
         policy_cls = PickAndTransferPolicy
     elif task_name == "sim_insertion_scripted":
@@ -104,7 +118,7 @@ def main(args):
         print(f"{episode_idx=}")
         print("Rollout out EE space scripted policy")
         # setup the environment
-        env = make_ee_sim_env(task_name)
+        env = make_ee_sim_env(task_name, camera_height=camera_height, camera_width=camera_width)
         ts = env.reset()
         episode = [ts]
         policy = policy_cls(inject_noise)
@@ -161,7 +175,7 @@ def main(args):
 
         # setup the environment
         print("Replaying joint commands")
-        env = make_sim_env(task_name)
+        env = make_sim_env(task_name, camera_height=camera_height, camera_width=camera_width)
         BOX_POSE[0] = (
             subtask_info  # make sure the sim_env has the same object configurations as ee_sim_env
         )
@@ -196,7 +210,7 @@ def main(args):
         For each timestep:
         observations
         - images
-            - each_cam_name     (480, 640, 3) 'uint8'
+            - each_cam_name     (H, W, 3) 'uint8'
         - qpos                  (14,)         'float64'
         - qvel                  (14,)         'float64'
 
@@ -230,6 +244,8 @@ def main(args):
                     ts.observation["images"][cam_name]
                 )
 
+        cam_h, cam_w = np.asarray(data_dict[f"/observations/images/{camera_names[0]}"]).shape[1:3]
+
         # HDF5
         t0 = time.time()
         dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}")
@@ -240,9 +256,9 @@ def main(args):
             for cam_name in camera_names:
                 _ = image.create_dataset(
                     cam_name,
-                    (max_timesteps, 480, 640, 3),
+                    (max_timesteps, cam_h, cam_w, 3),
                     dtype="uint8",
-                    chunks=(1, 480, 640, 3),
+                    chunks=(1, cam_h, cam_w, 3),
                 )
             # compression='gzip',compression_opts=2,)
             # compression=32001, compression_opts=(0, 0, 0, 0, 9, 1, 1), shuffle=False)
@@ -268,6 +284,20 @@ if __name__ == "__main__":
         "--num_episodes", action="store", type=int, help="num_episodes", required=False
     )
     parser.add_argument("--onscreen_render", action="store_true")
+    parser.add_argument(
+        "--camera_height",
+        action="store",
+        type=int,
+        default=None,
+        help=f"rendered image height (default: per-task config or {CAMERA_HEIGHT})",
+    )
+    parser.add_argument(
+        "--camera_width",
+        action="store",
+        type=int,
+        default=None,
+        help=f"rendered image width (default: per-task config or {CAMERA_WIDTH})",
+    )
     parser.add_argument(
         "--task_space",
         action="store_true",

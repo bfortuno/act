@@ -13,7 +13,7 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 import ee_transforms
-from constants import DT, PUPPET_GRIPPER_JOINT_OPEN
+from constants import CAMERA_HEIGHT, CAMERA_WIDTH, DT, PUPPET_GRIPPER_JOINT_OPEN
 from policy import ACTPolicy, CNNMLPPolicy, DiffusionFlowPolicy
 from sim_env import BOX_POSE
 from utils import (  # robot functions  # helper functions
@@ -281,7 +281,11 @@ def eval_bc(config, ckpt_name, save_episode=True):
         ### onscreen render
         if onscreen_render:
             ax = plt.subplot()
-            plt_img = ax.imshow(env._physics.render(height=480, width=640, camera_id=onscreen_cam))
+            plt_img = ax.imshow(
+                env._physics.render(
+                    height=CAMERA_HEIGHT, width=CAMERA_WIDTH, camera_id=onscreen_cam
+                )
+            )
             plt.ion()
 
         ### evaluation loop
@@ -299,7 +303,9 @@ def eval_bc(config, ckpt_name, save_episode=True):
             for t in range(max_timesteps):
                 ### update onscreen render and wait for DT
                 if onscreen_render:
-                    image = env._physics.render(height=480, width=640, camera_id=onscreen_cam)
+                    image = env._physics.render(
+                        height=CAMERA_HEIGHT, width=CAMERA_WIDTH, camera_id=onscreen_cam
+                    )
                     plt_img.set_data(image)
                     plt.pause(DT)
 
@@ -471,7 +477,11 @@ def eval_bc_task_space(config, ckpt_name, save_episode=True):
         ts = env.reset()
         if onscreen_render:
             ax = plt.subplot()
-            plt_img = ax.imshow(env._physics.render(height=480, width=640, camera_id=onscreen_cam))
+            plt_img = ax.imshow(
+                env._physics.render(
+                    height=CAMERA_HEIGHT, width=CAMERA_WIDTH, camera_id=onscreen_cam
+                )
+            )
             plt.ion()
 
         if temporal_agg:
@@ -484,7 +494,9 @@ def eval_bc_task_space(config, ckpt_name, save_episode=True):
         with torch.inference_mode():
             for t in range(max_timesteps):
                 if onscreen_render:
-                    image = env._physics.render(height=480, width=640, camera_id=onscreen_cam)
+                    image = env._physics.render(
+                        height=CAMERA_HEIGHT, width=CAMERA_WIDTH, camera_id=onscreen_cam
+                    )
                     plt_img.set_data(image)
                     plt.pause(DT)
 

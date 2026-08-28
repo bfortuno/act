@@ -29,6 +29,13 @@ SIM_TASK_CONFIGS = {
     },
 }
 
+### Camera parameters
+# Default rendered image resolution (pixels). Override per run via the
+# --camera_height / --camera_width CLI flags, or per task by adding
+# "camera_height" / "camera_width" keys to a SIM_TASK_CONFIGS entry.
+CAMERA_HEIGHT = 480
+CAMERA_WIDTH = 640
+
 ### Simulation envs fixed constants
 DT = 0.02
 JOINT_NAMES = ["waist", "shoulder", "elbow", "forearm_roll", "wrist_angle", "wrist_rotate"]

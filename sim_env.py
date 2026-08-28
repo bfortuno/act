@@ -9,6 +9,8 @@ from dm_control.rl import control
 from dm_control.suite import base
 
 from constants import (
+    CAMERA_HEIGHT,
+    CAMERA_WIDTH,
     DT,
     MASTER_GRIPPER_POSITION_NORMALIZE_FN,
     PUPPET_GRIPPER_POSITION_NORMALIZE_FN,
@@ -23,7 +25,7 @@ e = IPython.embed
 BOX_POSE = [None]  # to be changed from outside
 
 
-def make_sim_env(task_name):
+def make_sim_env(task_name, camera_height=CAMERA_HEIGHT, camera_width=CAMERA_WIDTH):
     """
     Environment for simulated robot bi-manual manipulation, with joint position control
     Action space:      [left_arm_qpos (6),             # absolute joint position
@@ -39,12 +41,14 @@ def make_sim_env(task_name):
                                         left_gripper_velocity (1),  # normalized gripper velocity (pos: opening, neg: closing)
                                         right_arm_qvel (6),         # absolute joint velocity (rad)
                                         right_gripper_qvel (1)]     # normalized gripper velocity (pos: opening, neg: closing)
-                        "images": {"main": (480x640x3)}        # h, w, c, dtype='uint8'
+                        "images": {"<cam>": (H x W x 3)}       # h, w, c, dtype='uint8'
     """
     if "sim_transfer_cube" in task_name:
         xml_path = os.path.join(XML_DIR, "bimanual_viperx_transfer_cube.xml")
         physics = mujoco.Physics.from_xml_path(xml_path)
-        task = TransferCubeTask(random=False)
+        task = TransferCubeTask(
+            random=False, camera_height=camera_height, camera_width=camera_width
+        )
         env = control.Environment(
             physics,
             task,
@@ -56,7 +60,7 @@ def make_sim_env(task_name):
     elif "sim_insertion" in task_name:
         xml_path = os.path.join(XML_DIR, "bimanual_viperx_insertion.xml")
         physics = mujoco.Physics.from_xml_path(xml_path)
-        task = InsertionTask(random=False)
+        task = InsertionTask(random=False, camera_height=camera_height, camera_width=camera_width)
         env = control.Environment(
             physics,
             task,
@@ -71,8 +75,10 @@ def make_sim_env(task_name):
 
 
 class BimanualViperXTask(base.Task):
-    def __init__(self, random=None):
+    def __init__(self, random=None, camera_height=CAMERA_HEIGHT, camera_width=CAMERA_WIDTH):
         super().__init__(random=random)
+        self.camera_height = camera_height
+        self.camera_width = camera_width
 
     def before_step(self, action, physics):
         left_arm_action = action[:6]
@@ -133,14 +139,13 @@ class BimanualViperXTask(base.Task):
         obs["qpos"] = self.get_qpos(physics)
         obs["qvel"] = self.get_qvel(physics)
         obs["env_state"] = self.get_env_state(physics)
+        h, w = self.camera_height, self.camera_width
         obs["images"] = dict()
-        obs["images"]["top"] = physics.render(height=480, width=640, camera_id="top")
-        obs["images"]["angle"] = physics.render(height=480, width=640, camera_id="angle")
-        obs["images"]["vis"] = physics.render(height=480, width=640, camera_id="front_close")
-        obs["images"]["left_wrist"] = physics.render(height=480, width=640, camera_id="left_wrist")
-        obs["images"]["right_wrist"] = physics.render(
-            height=480, width=640, camera_id="right_wrist"
-        )
+        obs["images"]["top"] = physics.render(height=h, width=w, camera_id="top")
+        obs["images"]["angle"] = physics.render(height=h, width=w, camera_id="angle")
+        obs["images"]["vis"] = physics.render(height=h, width=w, camera_id="front_close")
+        obs["images"]["left_wrist"] = physics.render(height=h, width=w, camera_id="left_wrist")
+        obs["images"]["right_wrist"] = physics.render(height=h, width=w, camera_id="right_wrist")
 
         return obs
 
@@ -150,8 +155,8 @@ class BimanualViperXTask(base.Task):
 
 
 class TransferCubeTask(BimanualViperXTask):
-    def __init__(self, random=None):
-        super().__init__(random=random)
+    def __init__(self, random=None, **kwargs):
+        super().__init__(random=random, **kwargs)
         self.max_reward = 4
 
     def initialize_episode(self, physics):
@@ -202,8 +207,8 @@ class TransferCubeTask(BimanualViperXTask):
 
 
 class InsertionTask(BimanualViperXTask):
-    def __init__(self, random=None):
-        super().__init__(random=random)
+    def __init__(self, random=None, **kwargs):
+        super().__init__(random=random, **kwargs)
         self.max_reward = 4
 
     def initialize_episode(self, physics):
