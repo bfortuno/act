@@ -27,37 +27,50 @@ You can find all scripted/human demo for simulated environments [here](https://d
 
 ### Installation
 
-    conda create -n aloha python=3.8.10
-    conda activate aloha
-    pip install torchvision
-    pip install torch
-    pip install pyquaternion
-    pip install pyyaml
-    pip install rospkg
-    pip install pexpect
-    pip install mujoco==2.3.7
-    pip install dm_control==1.0.14
-    pip install opencv-python
-    pip install matplotlib
-    pip install einops
-    pip install packaging
-    pip install h5py
-    pip install ipython
-    cd act/detr && pip install -e .
+This repo uses [uv](https://docs.astral.sh/uv/) for dependency management.
+Install uv, then from the repo root run:
+
+    uv sync
+
+This creates a `.venv` with all dependencies (including the local `detr` package) pinned in `uv.lock`.
 
 ### Example Usages
 
-To set up a new terminal, run:
+Run every script through `uv run` from the repo root (no manual venv activation needed), e.g.
 
-    conda activate aloha
     cd <path to act repo>
+    uv run python record_sim_episodes.py ...
+
+`uv run` transparently keeps the environment in sync with `pyproject.toml` / `uv.lock` before each call.
+
+#### Running under WSL
+
+The default MuJoCo GL backend (GLX/GLFW) needs a real X display and tends to abort
+under WSL with `xcb ... Aborting`. Use `wsl_gl.sh` to pick a working setup once per
+shell, then run the scripts normally:
+
+    source wsl_gl.sh headless     # offscreen only (data gen, training, eval videos) - EGL + matplotlib Agg
+    source wsl_gl.sh onscreen     # also show the live --onscreen_render window via WSLg X - EGL + matplotlib TkAgg
+    source wsl_gl.sh status       # print the current settings and run a render self-test
+
+    uv run python imitate_episodes.py ...
+
+Or wrap a single command without sourcing:
+
+    ./wsl_gl.sh headless uv run python record_sim_episodes.py --task_name sim_transfer_cube_scripted ...
+
+Both modes render on the GPU via EGL (this repo only ever renders offscreen); the
+`onscreen` mode additionally wires up `$DISPLAY` and an interactive matplotlib
+backend for the live preview. To manage it yourself, just export `MUJOCO_GL`
+(`egl`, or `glfw` if you have a working X display) and `MPLBACKEND` before running
+and skip the script.
 
 ### Simulated experiments
 
 We use ``sim_transfer_cube_scripted`` task in the examples below. Another option is ``sim_insertion_scripted``.
 To generated 50 episodes of scripted data, run:
 
-    python3 record_sim_episodes.py \
+    uv run python record_sim_episodes.py \
     --task_name sim_transfer_cube_scripted \
     --dataset_dir <data save dir> \
     --num_episodes 50
@@ -65,12 +78,12 @@ To generated 50 episodes of scripted data, run:
 To can add the flag ``--onscreen_render`` to see real-time rendering.
 To visualize the episode after it is collected, run
 
-    python3 visualize_episodes.py --dataset_dir <data save dir> --episode_idx 0
+    uv run python visualize_episodes.py --dataset_dir <data save dir> --episode_idx 0
 
 To train ACT:
-    
+
     # Transfer Cube task
-    python3 imitate_episodes.py \
+    uv run python imitate_episodes.py \
     --task_name sim_transfer_cube_scripted \
     --ckpt_dir <ckpt dir> \
     --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 --batch_size 8 --dim_feedforward 3200 \

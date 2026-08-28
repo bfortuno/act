@@ -22,7 +22,7 @@ def load_hdf5(dataset_dir, dataset_name):
     with h5py.File(dataset_path, 'r') as root:
         is_sim = root.attrs['sim']
         qpos = root['/observations/qpos'][()]
-        qvel = root['/observations/qvel'][()]
+        qvel = root['/observations/qvel'][()] if '/observations/qvel' in root else None
         action = root['/action'][()]
         image_dict = dict()
         for cam_name in root[f'/observations/images/'].keys():
@@ -91,6 +91,8 @@ def visualize_joints(qpos_list, command_list, plot_path=None, ylim=None, label_o
 
     # plot joint state
     all_names = [name + '_left' for name in STATE_NAMES] + [name + '_right' for name in STATE_NAMES]
+    if len(all_names) != num_dim:  # e.g. task-space EE-pose data (16 / 14 / 20 dim)
+        all_names = [f'dim_{i}' for i in range(num_dim)]
     for dim_idx in range(num_dim):
         ax = axs[dim_idx]
         ax.plot(qpos[:, dim_idx], label=label1)

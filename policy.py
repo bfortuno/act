@@ -2,7 +2,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.transforms as transforms
 
-from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
+from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer, build_DiffusionFlow_model_and_optimizer
 import IPython
 e = IPython.embed
 
@@ -67,6 +67,34 @@ class CNNMLPPolicy(nn.Module):
 
     def configure_optimizers(self):
         return self.optimizer
+
+class DiffusionFlowPolicy(nn.Module):
+    """Flow-matching (rectified-flow) policy with a gr00t-style DiT denoiser and the
+    ACT CNN backbone. See detr/models/diffusion_flow.py."""
+    def __init__(self, args_override):
+        super().__init__()
+        model, optimizer = build_DiffusionFlow_model_and_optimizer(args_override)
+        self.model = model
+        self.optimizer = optimizer
+        self.num_queries = model.num_queries
+        print(f'DiffusionFlow: dit_arch={model.dit_arch} num_queries={model.num_queries} '
+              f'n_inference_steps={model.n_inference_steps} '
+              f'state_dropout={model.state_dropout_prob} cam_dropout={model.cam_dropout_prob}')
+
+    def __call__(self, qpos, image, actions=None, is_pad=None):
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+        image = normalize(image)
+        if actions is not None:  # training time
+            actions = actions[:, :self.model.num_queries]
+            is_pad = is_pad[:, :self.model.num_queries]
+            return self.model.compute_loss(qpos, image, actions, is_pad)
+        else:  # inference time
+            return self.model.sample(qpos, image)  # (bs, num_queries, action_dim)
+
+    def configure_optimizers(self):
+        return self.optimizer
+
 
 def kl_divergence(mu, logvar):
     batch_size = mu.size(0)

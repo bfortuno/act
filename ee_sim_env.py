@@ -2,7 +2,7 @@ import numpy as np
 import collections
 import os
 
-from constants import DT, XML_DIR, START_ARM_POSE
+from constants import DT, XML_DIR, START_ARM_POSE, EE_LINK_NAMES
 from constants import PUPPET_GRIPPER_POSITION_CLOSE
 from constants import PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN
 from constants import PUPPET_GRIPPER_POSITION_NORMALIZE_FN
@@ -125,6 +125,26 @@ class BimanualViperXEETask(base.Task):
         return np.concatenate([left_arm_qvel, left_gripper_qvel, right_arm_qvel, right_gripper_qvel])
 
     @staticmethod
+    def get_ee_pose(physics):
+        """Achieved end-effector pose, canonical 16-dim task-space vector:
+        [ l_xyz(3), l_quat_wxyz(4), l_grip_norm(1),
+          r_xyz(3), r_quat_wxyz(4), r_grip_norm(1) ]
+        xyz / quat are the world pose of each gripper_link body; gripper is the
+        normalized finger position (0: close, 1: open), same convention as get_qpos.
+        """
+        qpos_raw = physics.data.qpos.copy()
+        left_grip = PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos_raw[6])
+        right_grip = PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos_raw[8 + 6])
+        left_name, right_name = EE_LINK_NAMES
+        left = np.concatenate([physics.named.data.xpos[left_name].copy(),
+                               physics.named.data.xquat[left_name].copy(),
+                               [left_grip]])
+        right = np.concatenate([physics.named.data.xpos[right_name].copy(),
+                                physics.named.data.xquat[right_name].copy(),
+                                [right_grip]])
+        return np.concatenate([left, right])
+
+    @staticmethod
     def get_env_state(physics):
         raise NotImplementedError
 
@@ -133,11 +153,14 @@ class BimanualViperXEETask(base.Task):
         obs = collections.OrderedDict()
         obs['qpos'] = self.get_qpos(physics)
         obs['qvel'] = self.get_qvel(physics)
+        obs['ee_pose'] = self.get_ee_pose(physics)
         obs['env_state'] = self.get_env_state(physics)
         obs['images'] = dict()
         obs['images']['top'] = physics.render(height=480, width=640, camera_id='top')
         obs['images']['angle'] = physics.render(height=480, width=640, camera_id='angle')
         obs['images']['vis'] = physics.render(height=480, width=640, camera_id='front_close')
+        obs['images']['left_wrist'] = physics.render(height=480, width=640, camera_id='left_wrist')
+        obs['images']['right_wrist'] = physics.render(height=480, width=640, camera_id='right_wrist')
         # used in scripted policy to obtain starting pose
         obs['mocap_pose_left'] = np.concatenate([physics.data.mocap_pos[0], physics.data.mocap_quat[0]]).copy()
         obs['mocap_pose_right'] = np.concatenate([physics.data.mocap_pos[1], physics.data.mocap_quat[1]]).copy()

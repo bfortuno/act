@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from .models import build_ACT_model, build_CNNMLP_model
+from .models import build_ACT_model, build_CNNMLP_model, build_DiffusionFlow_model
 
 import IPython
 e = IPython.embed
@@ -47,6 +47,10 @@ def get_args_parser():
     parser.add_argument('--num_queries', default=400, type=int, # will be overridden
                         help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
+    parser.add_argument('--state_dim', default=14, type=int, # will be overridden
+                        help="Proprioceptive state dimension")
+    parser.add_argument('--action_dim', default=14, type=int, # will be overridden
+                        help="Action dimension")
 
     # * Segmentation
     parser.add_argument('--masks', action='store_true',
@@ -63,6 +67,21 @@ def get_args_parser():
     parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
     parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
+    parser.add_argument('--dataset_dir', action='store', type=str, default=None)
+    parser.add_argument('--num_episodes', action='store', type=int, default=None)
+    parser.add_argument('--task_space', action='store_true')
+    parser.add_argument('--action_repr', action='store', type=str, default='absolute')
+    parser.add_argument('--rot_repr', action='store', type=str, default='quat')
+    parser.add_argument('--num_rollouts', action='store', type=int, default=None)
+    parser.add_argument('--num_checkpoints', action='store', type=int, default=5)
+
+    # for DiffusionFlow (flow-matching DiT policy)
+    parser.add_argument('--dit_arch', action='store', type=str, default='cross_attn',
+                        choices=('cross_attn', 'concat'))
+    parser.add_argument('--dit_layers', action='store', type=int, default=8)
+    parser.add_argument('--n_inference_steps', action='store', type=int, default=4)
+    parser.add_argument('--state_dropout_prob', action='store', type=float, default=0.0)
+    parser.add_argument('--cam_dropout_prob', action='store', type=float, default=0.0)
 
     return parser
 
@@ -75,6 +94,29 @@ def build_ACT_model_and_optimizer(args_override):
         setattr(args, k, v)
 
     model = build_ACT_model(args)
+    model.cuda()
+
+    param_dicts = [
+        {"params": [p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad]},
+        {
+            "params": [p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad],
+            "lr": args.lr_backbone,
+        },
+    ]
+    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
+                                  weight_decay=args.weight_decay)
+
+    return model, optimizer
+
+
+def build_DiffusionFlow_model_and_optimizer(args_override):
+    parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
+    args = parser.parse_args()
+
+    for k, v in args_override.items():
+        setattr(args, k, v)
+
+    model = build_DiffusionFlow_model(args)
     model.cuda()
 
     param_dicts = [

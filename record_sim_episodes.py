@@ -9,9 +9,47 @@ from constants import PUPPET_GRIPPER_POSITION_NORMALIZE_FN, SIM_TASK_CONFIGS
 from ee_sim_env import make_ee_sim_env
 from sim_env import make_sim_env, BOX_POSE
 from scripted_policy import PickAndTransferPolicy, InsertionPolicy
+import ee_transforms
 
 import IPython
 e = IPython.embed
+
+
+def save_task_space_episode(dataset_dir, episode_idx, episode, policy_actions, camera_names, episode_len):
+    """Save one episode in canonical task-space form.
+
+    /observations/qpos  (episode_len, 16)  achieved EE pose  [xyz, quat_wxyz, grip] x2
+    /action             (episode_len, 16)  commanded EE target (scripted policy output)
+    /observations/images/<cam>  (episode_len, 480, 640, 3) uint8
+    No qvel. Rotation representation stored is raw quaternion; the dataset loader converts
+    to quat / rpy / rot6d and to absolute / delta / relative at train time.
+    """
+    max_timesteps = episode_len
+    qpos = np.stack([ee_transforms.canonicalize_quats(episode[t].observation['ee_pose'])
+                     for t in range(max_timesteps)]).astype(np.float32)
+    action = np.stack([ee_transforms.canonicalize_quats(np.asarray(policy_actions[t]))
+                       for t in range(max_timesteps)]).astype(np.float32)
+    data_dict = {'/observations/qpos': qpos, '/action': action}
+    for cam_name in camera_names:
+        data_dict[f'/observations/images/{cam_name}'] = np.stack(
+            [episode[t].observation['images'][cam_name] for t in range(max_timesteps)])
+
+    t0 = time.time()
+    dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}')
+    with h5py.File(dataset_path + '.hdf5', 'w', rdcc_nbytes=1024 ** 2 * 2) as root:
+        root.attrs['sim'] = True
+        root.attrs['task_space'] = True
+        root.attrs['rot_repr'] = 'quat'
+        obs = root.create_group('observations')
+        image = obs.create_group('images')
+        for cam_name in camera_names:
+            image.create_dataset(cam_name, (max_timesteps, 480, 640, 3), dtype='uint8',
+                                 chunks=(1, 480, 640, 3))
+        obs.create_dataset('qpos', (max_timesteps, ee_transforms.CANONICAL_DIM))
+        root.create_dataset('action', (max_timesteps, ee_transforms.CANONICAL_DIM))
+        for name, array in data_dict.items():
+            root[name][...] = array
+    print(f'Saving: {time.time() - t0:.1f} secs\n')
 
 
 def main(args):
@@ -21,12 +59,18 @@ def main(args):
     Replace the gripper joint positions with the commanded joint position.
     Replay this joint trajectory (as action sequence) in sim_env, and record all observations.
     Save this episode of data, and continue to next episode of data collection.
+
+    With --task_space, skip the joint-space replay and instead record, straight from the
+    EE rollout, the canonical 16-dim task-space vectors: /observations/qpos = achieved EE
+    pose [xyz, quat_wxyz, grip] x2, /action = the scripted policy's commanded EE target.
+    qvel is not recorded. See ee_transforms.py.
     """
 
     task_name = args['task_name']
     dataset_dir = args['dataset_dir']
     num_episodes = args['num_episodes']
     onscreen_render = args['onscreen_render']
+    task_space = args['task_space']
     inject_noise = False
     render_cam_name = 'angle'
 
@@ -51,6 +95,7 @@ def main(args):
         ts = env.reset()
         episode = [ts]
         policy = policy_cls(inject_noise)
+        policy_actions = []
         # setup plotting
         if onscreen_render:
             ax = plt.subplot()
@@ -58,6 +103,7 @@ def main(args):
             plt.ion()
         for step in range(episode_len):
             action = policy(ts)
+            policy_actions.append(np.array(action))
             ts = env.step(action)
             episode.append(ts)
             if onscreen_render:
@@ -71,6 +117,17 @@ def main(args):
             print(f"{episode_idx=} Successful, {episode_return=}")
         else:
             print(f"{episode_idx=} Failed")
+
+        if task_space:
+            # record achieved EE pose + commanded EE target straight from the EE rollout;
+            # no joint-space replay
+            success.append(int(episode_max_reward == env.task.max_reward))
+            save_task_space_episode(dataset_dir, episode_idx, episode, policy_actions,
+                                    camera_names, episode_len)
+            del env
+            del episode
+            del policy
+            continue
 
         joint_traj = [ts.observation['qpos'] for ts in episode]
         # replace gripper pose with gripper control
@@ -184,6 +241,8 @@ if __name__ == '__main__':
     parser.add_argument('--dataset_dir', action='store', type=str, help='dataset saving dir', required=True)
     parser.add_argument('--num_episodes', action='store', type=int, help='num_episodes', required=False)
     parser.add_argument('--onscreen_render', action='store_true')
+    parser.add_argument('--task_space', action='store_true',
+                        help='record canonical task-space EE pose (16-dim) instead of joint-space (14-dim)')
     
     main(vars(parser.parse_args()))
 
