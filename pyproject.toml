@@ -54,3 +54,28 @@ py-modules = [
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+extend-exclude = ["detr/util", "detr/models/position_encoding.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ty.environment]
+python-version = "3.8"
+
+[tool.ty.rules]
+unresolved-import = "ignore"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=3.5.0",
+    "ruff>=0.16.5",
+    "ty>=0.0.75",
+]
