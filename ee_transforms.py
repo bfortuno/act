@@ -22,8 +22,8 @@ Conventions:
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-CANONICAL_DIM = 16          # bimanual canonical pose vector
-ARM_CANONICAL_DIM = 8       # xyz(3) + quat_wxyz(4) + grip(1)
+CANONICAL_DIM = 16  # bimanual canonical pose vector
+ARM_CANONICAL_DIM = 8  # xyz(3) + quat_wxyz(4) + grip(1)
 ROT6D_IDENTITY = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
 ROT_DIM = {"quat": 4, "rpy": 3, "rot6d": 6}
@@ -44,6 +44,7 @@ def state_dim(rot_repr):
 # --------------------------------------------------------------------------------------
 # rotation-matrix <-> representation
 # --------------------------------------------------------------------------------------
+
 
 def _canonicalize_quat_wxyz(q):
     """Force a consistent hemisphere (w >= 0) to avoid double-cover sign flips."""
@@ -128,6 +129,7 @@ def rot_to_mat(x, rot_repr):
 # canonical-vector helpers
 # --------------------------------------------------------------------------------------
 
+
 def _arm_slices():
     return (slice(0, ARM_CANONICAL_DIM), slice(ARM_CANONICAL_DIM, CANONICAL_DIM))
 
@@ -143,13 +145,14 @@ def canonicalize_quats(vec16):
     out = np.array(vec16, dtype=np.float64)
     for s in _arm_slices():
         q = out[..., s][..., 3:7]
-        out[..., s.start + 3: s.start + 7] = _canonicalize_quat_wxyz(q)
+        out[..., s.start + 3 : s.start + 7] = _canonicalize_quat_wxyz(q)
     return out
 
 
 # --------------------------------------------------------------------------------------
 # state transform
 # --------------------------------------------------------------------------------------
+
 
 def transform_state(ee_pose16, rot_repr):
     """Canonical (..., 16) achieved pose -> (..., state_dim(rot_repr)) feature vector.
@@ -168,6 +171,7 @@ def transform_state(ee_pose16, rot_repr):
 # --------------------------------------------------------------------------------------
 # action transforms  (Fig. 6: absolute / delta / relative)
 # --------------------------------------------------------------------------------------
+
 
 def _transform_arm_chunk(xyz_t, R_t, grip_t, ref_xyz, ref_R, action_repr, rot_repr):
     if action_repr == "absolute":
@@ -189,7 +193,7 @@ def _transform_arm_chunk(xyz_t, R_t, grip_t, ref_xyz, ref_R, action_repr, rot_re
 def _invert_arm_chunk(feat, ref_xyz, ref_R, action_repr, rot_repr):
     d = ROT_DIM[rot_repr]
     out_xyz = feat[:, 0:3]
-    out_R = rot_to_mat(feat[:, 3:3 + d], rot_repr)
+    out_R = rot_to_mat(feat[:, 3 : 3 + d], rot_repr)
     grip_t = feat[:, 3 + d]
     if action_repr == "absolute":
         xyz_t, R_t = out_xyz, out_R
@@ -219,9 +223,17 @@ def transform_action_chunk(abs_chunk, ref, action_repr, rot_repr):
     for s in _arm_slices():
         xyz_t, quat_t, grip_t = split_canonical_arm(abs_chunk[:, s])
         ref_xyz, ref_quat, _ = split_canonical_arm(ref[s])
-        outs.append(_transform_arm_chunk(
-            xyz_t, quat_wxyz_to_mat(quat_t), grip_t,
-            ref_xyz, quat_wxyz_to_mat(ref_quat), action_repr, rot_repr))
+        outs.append(
+            _transform_arm_chunk(
+                xyz_t,
+                quat_wxyz_to_mat(quat_t),
+                grip_t,
+                ref_xyz,
+                quat_wxyz_to_mat(ref_quat),
+                action_repr,
+                rot_repr,
+            )
+        )
     return np.concatenate(outs, axis=-1)
 
 
@@ -232,16 +244,18 @@ def invert_action_chunk(pred, ref, action_repr, rot_repr):
     ad = arm_dim(rot_repr)
     outs = []
     for i, s in enumerate(_arm_slices()):
-        feat = pred[:, i * ad:(i + 1) * ad]
+        feat = pred[:, i * ad : (i + 1) * ad]
         ref_xyz, ref_quat, _ = split_canonical_arm(ref[s])
-        outs.append(_invert_arm_chunk(
-            feat, ref_xyz, quat_wxyz_to_mat(ref_quat), action_repr, rot_repr))
+        outs.append(
+            _invert_arm_chunk(feat, ref_xyz, quat_wxyz_to_mat(ref_quat), action_repr, rot_repr)
+        )
     return np.concatenate(outs, axis=-1)
 
 
 # --------------------------------------------------------------------------------------
 # normalization mask
 # --------------------------------------------------------------------------------------
+
 
 def normalizable_mask(rot_repr):
     """bool (state_dim,): True only on translation (xyz) channels.
@@ -252,13 +266,14 @@ def normalizable_mask(rot_repr):
     ad = arm_dim(rot_repr)
     m = np.zeros(2 * ad, dtype=bool)
     for i in range(2):
-        m[i * ad: i * ad + 3] = True
+        m[i * ad : i * ad + 3] = True
     return m
 
 
 # --------------------------------------------------------------------------------------
 # self-test: round-trip transform / invert for all 9 combos
 # --------------------------------------------------------------------------------------
+
 
 def _random_canonical(n, rng):
     xyz = rng.uniform([-0.3, 0.3, 0.0], [0.3, 0.8, 0.5], size=(n, 3))

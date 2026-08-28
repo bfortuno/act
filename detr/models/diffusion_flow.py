@@ -26,9 +26,11 @@ Regularization (training only):
   * camera dropout - each camera's visual tokens masked out of attention with
     prob ``cam_dropout_prob`` (>= 1 camera always kept).
 """
+
 import math
 from types import SimpleNamespace
 
+import IPython
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -36,7 +38,6 @@ from torch.distributions import Beta
 
 from .backbone import build_backbone
 
-import IPython
 e = IPython.embed
 
 
@@ -44,13 +45,12 @@ e = IPython.embed
 # helpers
 # ---------------------------------------------------------------------------
 
+
 def sinusoidal_embedding(values, dim, max_period=10000.0):
     """(...,) -> (..., dim) log-spaced [cos, sin] embedding (diffusers/OpenAI style)."""
     half = dim // 2
     freqs = torch.exp(
-        -math.log(max_period)
-        * torch.arange(half, dtype=torch.float32, device=values.device)
-        / half
+        -math.log(max_period) * torch.arange(half, dtype=torch.float32, device=values.device) / half
     )
     args = values.float()[..., None] * freqs
     emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -99,9 +99,7 @@ class DiTBlock(nn.Module):
         assert mode in ("self", "cross")
         self.mode = mode
         self.norm1 = AdaLN(hidden_dim)
-        self.attn = nn.MultiheadAttention(
-            hidden_dim, n_heads, dropout=dropout, batch_first=True
-        )
+        self.attn = nn.MultiheadAttention(hidden_dim, n_heads, dropout=dropout, batch_first=True)
         self.norm2 = nn.LayerNorm(hidden_dim)
         inner = int(hidden_dim * mlp_ratio)
         self.ff = nn.Sequential(
@@ -118,9 +116,7 @@ class DiTBlock(nn.Module):
             kv = memory
         else:
             kv = h
-        attn_out, _ = self.attn(
-            h, kv, kv, key_padding_mask=key_padding_mask, need_weights=False
-        )
+        attn_out, _ = self.attn(h, kv, kv, key_padding_mask=key_padding_mask, need_weights=False)
         x = x + attn_out
         x = x + self.ff(self.norm2(x))
         return x
@@ -129,6 +125,7 @@ class DiTBlock(nn.Module):
 # ---------------------------------------------------------------------------
 # model
 # ---------------------------------------------------------------------------
+
 
 class DiffusionFlowModel(nn.Module):
     def __init__(
@@ -225,15 +222,15 @@ class DiffusionFlowModel(nn.Module):
         tokens_per_cam = None
         for cam_id in range(n_cam):
             features, pos = self.backbones[cam_id](image[:, cam_id])
-            feat = self.input_proj(features[0])           # (B, D, h, w)
-            pos = pos[0]                                  # (1, D, h, w)
+            feat = self.input_proj(features[0])  # (B, D, h, w)
+            pos = pos[0]  # (1, D, h, w)
             h, w = feat.shape[-2:]
             tokens_per_cam = h * w
-            feat = feat.flatten(2).permute(0, 2, 1)       # (B, hw, D)
-            pos = pos.flatten(2).permute(0, 2, 1)         # (1, hw, D)
+            feat = feat.flatten(2).permute(0, 2, 1)  # (B, hw, D)
+            pos = pos.flatten(2).permute(0, 2, 1)  # (1, hw, D)
             tok = feat + pos + self.cam_embed.weight[cam_id][None, None]
             cam_tokens.append(tok)
-        vis_tokens = torch.cat(cam_tokens, dim=1)         # (B, n_cam*hw, D)
+        vis_tokens = torch.cat(cam_tokens, dim=1)  # (B, n_cam*hw, D)
         vis_tokens = self.vis_norm(vis_tokens)
 
         vis_kpm = None
@@ -244,7 +241,7 @@ class DiffusionFlowModel(nn.Module):
             if none_kept.any():
                 rand_cam = torch.randint(0, n_cam, (bs,), device=qpos.device)
                 keep[none_kept, rand_cam[none_kept]] = True
-            drop = ~keep                                  # (B, n_cam) True == masked
+            drop = ~keep  # (B, n_cam) True == masked
             vis_kpm = drop.repeat_interleave(tokens_per_cam, dim=1)  # (B, N)
 
         if training and self.state_dropout_prob > 0:
@@ -257,21 +254,21 @@ class DiffusionFlowModel(nn.Module):
     def denoise(self, x_t, t_cont, state_token, vis_tokens, vis_kpm):
         """x_t (B, T, action_dim), t_cont (B,) -> predicted velocity (B, T, action_dim)."""
         bs, T, _ = x_t.shape
-        temb = self.time_enc(t_cont)                                  # (B, D)
+        temb = self.time_enc(t_cont)  # (B, D)
 
         time_feat = sinusoidal_embedding(
             (t_cont * self.num_timestep_buckets), self.hidden_dim
-        )                                                            # (B, D)
-        a = self.act_in(x_t)                                         # (B, T, D)
+        )  # (B, D)
+        a = self.act_in(x_t)  # (B, T, D)
         a = torch.cat([a, time_feat[:, None, :].expand(-1, T, -1)], dim=-1)
         a = self.act_mlp(a)
         a = a + self.act_pos.weight[None, :T, :]
 
         if self.dit_arch == "cross_attn":
-            h = torch.cat([state_token, a], dim=1)                   # (B, 1+T, D)
+            h = torch.cat([state_token, a], dim=1)  # (B, 1+T, D)
             self_kpm = None
         else:
-            h = torch.cat([state_token, vis_tokens, a], dim=1)       # (B, 1+N+T, D)
+            h = torch.cat([state_token, vis_tokens, a], dim=1)  # (B, 1+N+T, D)
             if vis_kpm is not None:
                 pad = torch.zeros(bs, 1, dtype=torch.bool, device=h.device)
                 tail = torch.zeros(bs, T, dtype=torch.bool, device=h.device)
@@ -292,11 +289,11 @@ class DiffusionFlowModel(nn.Module):
     def compute_loss(self, qpos, image, actions, is_pad):
         state_token, vis_tokens, vis_kpm = self.encode_obs(qpos, image, self.training)
 
-        x1 = actions                                                # (B, T, action_dim)
+        x1 = actions  # (B, T, action_dim)
         bs, T, _ = x1.shape
         x0 = torch.randn_like(x1)
         u = self._beta_dist().sample((bs,)).to(x1.device)
-        t = (1.0 - u) * self.noise_s                                # (B,) in [0, noise_s]
+        t = (1.0 - u) * self.noise_s  # (B,) in [0, noise_s]
         t_b = t[:, None, None]
         x_t = (1.0 - t_b) * x0 + t_b * x1
         v_tgt = x1 - x0
@@ -330,6 +327,7 @@ class DiffusionFlowModel(nn.Module):
 # ---------------------------------------------------------------------------
 # builder
 # ---------------------------------------------------------------------------
+
 
 def build_diffusion_flow(args):
     backbones = [build_backbone(args) for _ in args.camera_names]
@@ -366,10 +364,20 @@ if __name__ == "__main__":
 
     def _args(state_dim, **kw):
         base = dict(
-            backbone="resnet18", lr_backbone=1e-5, masks=False, dilation=False,
-            position_embedding="sine", hidden_dim=256, dim_feedforward=1024,
-            nheads=8, dropout=0.1, num_queries=16, camera_names=cams,
-            state_dim=state_dim, action_dim=state_dim, dit_layers=4,
+            backbone="resnet18",
+            lr_backbone=1e-5,
+            masks=False,
+            dilation=False,
+            position_embedding="sine",
+            hidden_dim=256,
+            dim_feedforward=1024,
+            nheads=8,
+            dropout=0.1,
+            num_queries=16,
+            camera_names=cams,
+            state_dim=state_dim,
+            action_dim=state_dim,
+            dit_layers=4,
             n_inference_steps=4,
         )
         base.update(kw)
@@ -379,8 +387,9 @@ if __name__ == "__main__":
         for state_dim in (16, 20):  # quat-bimanual, rot6d-bimanual
             for sdp, cdp in ((0.0, 0.0), (0.5, 0.5)):
                 m = build_diffusion_flow(
-                    _args(state_dim, dit_arch=dit_arch,
-                          state_dropout_prob=sdp, cam_dropout_prob=cdp)
+                    _args(
+                        state_dim, dit_arch=dit_arch, state_dropout_prob=sdp, cam_dropout_prob=cdp
+                    )
                 )
                 B, T = 2, 16
                 qpos = torch.randn(B, state_dim)
@@ -397,6 +406,8 @@ if __name__ == "__main__":
                 m.eval()
                 s = m.sample(qpos, img)
                 assert s.shape == (B, m.num_queries, state_dim), s.shape
-                print(f"ok  {dit_arch:10s} state_dim={state_dim:2d} "
-                      f"sdp={sdp} cdp={cdp}  loss={out['loss'].item():.4f}")
+                print(
+                    f"ok  {dit_arch:10s} state_dim={state_dim:2d} "
+                    f"sdp={sdp} cdp={cdp}  loss={out['loss'].item():.4f}"
+                )
     print("all diffusion_flow self-tests passed")
