@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import os
 import pickle
 from copy import deepcopy
@@ -238,8 +239,11 @@ def eval_bc(config, ckpt_name, save_episode=True):
     with open(stats_path, "rb") as f:
         stats = pickle.load(f)
 
-    pre_process = lambda s_qpos: (s_qpos - stats["qpos_mean"]) / stats["qpos_std"]
-    post_process = lambda a: a * stats["action_std"] + stats["action_mean"]
+    def pre_process(s_qpos):
+        return (s_qpos - stats["qpos_mean"]) / stats["qpos_std"]
+
+    def post_process(a):
+        return a * stats["action_std"] + stats["action_mean"]
 
     # load environment
     if real_robot:
@@ -355,7 +359,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
             pass
 
         rewards = np.array(rewards)
-        episode_return = np.sum(rewards[rewards != None])
+        episode_return = np.sum(rewards[rewards != None])  # noqa: E711  numpy boolean-mask, drops None entries
         episode_returns.append(episode_return)
         episode_highest_reward = np.max(rewards)
         highest_rewards.append(episode_highest_reward)
@@ -514,7 +518,7 @@ def eval_bc_task_space(config, ckpt_name, save_episode=True):
             plt.close()
 
         rewards = np.array(rewards)
-        episode_return = np.sum(rewards[rewards != None])
+        episode_return = np.sum(rewards[rewards != None])  # noqa: E711  numpy boolean-mask, drops None entries
         episode_returns.append(episode_return)
         episode_highest_reward = np.max(rewards)
         highest_rewards.append(episode_highest_reward)
@@ -566,15 +570,11 @@ def prune_old_checkpoints(ckpt_dir, seed, keep):
     epochs = []
     for name in os.listdir(ckpt_dir):
         if name.startswith(prefix) and name.endswith(suffix):
-            try:
+            with contextlib.suppress(ValueError):
                 epochs.append(int(name[len(prefix) : -len(suffix)]))
-            except ValueError:
-                pass
     for ep in sorted(epochs)[:-keep]:
-        try:
+        with contextlib.suppress(OSError):
             os.remove(os.path.join(ckpt_dir, f"{prefix}{ep}{suffix}"))
-        except OSError:
-            pass
 
 
 def train_bc(train_dataloader, val_dataloader, config):
@@ -601,7 +601,7 @@ def train_bc(train_dataloader, val_dataloader, config):
         with torch.inference_mode():
             policy.eval()
             epoch_dicts = []
-            for batch_idx, data in enumerate(val_dataloader):
+            for data in val_dataloader:
                 forward_dict = forward_pass(data, policy)
                 epoch_dicts.append(forward_dict)
             epoch_summary = compute_dict_mean(epoch_dicts)
@@ -620,7 +620,7 @@ def train_bc(train_dataloader, val_dataloader, config):
         # training
         policy.train()
         optimizer.zero_grad()
-        for batch_idx, data in enumerate(train_dataloader):
+        for batch_idx, data in enumerate(train_dataloader):  # noqa: B007  batch_idx used after loop
             forward_dict = forward_pass(data, policy)
             # backward
             loss = forward_dict["loss"]

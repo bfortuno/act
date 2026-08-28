@@ -47,10 +47,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
             is_sim = root.attrs["sim"]
             original_action_shape = root["/action"].shape
             episode_len = original_action_shape[0]
-            if sample_full_episode:
-                start_ts = 0
-            else:
-                start_ts = np.random.choice(episode_len)
+            start_ts = 0 if sample_full_episode else np.random.choice(episode_len)
             # get observation at start_ts only
             qpos = root["/observations/qpos"][start_ts]
             image_dict = dict()
@@ -218,7 +215,6 @@ def get_norm_stats(
         dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
         with h5py.File(dataset_path, "r") as root:
             qpos = root["/observations/qpos"][()]
-            qvel = root["/observations/qvel"][()]
             action = root["/action"][()]
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))

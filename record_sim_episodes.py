@@ -114,7 +114,7 @@ def main(args):
             ax = plt.subplot()
             plt_img = ax.imshow(ts.observation["images"][render_cam_name])
             plt.ion()
-        for step in range(episode_len):
+        for _step in range(episode_len):
             action = policy(ts)
             policy_actions.append(np.array(action))
             ts = env.step(action)
@@ -246,8 +246,8 @@ def main(args):
                 )
             # compression='gzip',compression_opts=2,)
             # compression=32001, compression_opts=(0, 0, 0, 0, 9, 1, 1), shuffle=False)
-            qpos = obs.create_dataset("qpos", (max_timesteps, 14))
-            qvel = obs.create_dataset("qvel", (max_timesteps, 14))
+            obs.create_dataset("qpos", (max_timesteps, 14))
+            obs.create_dataset("qvel", (max_timesteps, 14))
             action = root.create_dataset("action", (max_timesteps, 14))
 
             for name, array in data_dict.items():

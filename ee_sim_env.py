@@ -274,9 +274,9 @@ class InsertionEETask(BimanualViperXEETask):
         self.initialize_robots(physics)
         # randomize peg and socket position
         peg_pose, socket_pose = sample_insertion_pose()
-        id2index = lambda j_id: (
-            16 + (j_id - 16) * 7
-        )  # first 16 is robot qpos, 7 is pose dim # hacky
+
+        def id2index(j_id):
+            return 16 + (j_id - 16) * 7  # first 16 is robot qpos, 7 is pose dim # hacky
 
         peg_start_id = physics.model.name2id("red_peg_joint", "joint")
         peg_start_idx = id2index(peg_start_id)

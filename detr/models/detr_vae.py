@@ -133,7 +133,7 @@ class DETRVAE(nn.Module):
             # Image observation features and position embeddings
             all_cam_features = []
             all_cam_pos = []
-            for cam_id, cam_name in enumerate(self.camera_names):
+            for cam_id, _cam_name in enumerate(self.camera_names):
                 features, pos = self.backbones[cam_id](image[:, cam_id])
                 features = features[0]  # take the last layer feature
                 pos = pos[0]
@@ -207,11 +207,10 @@ class CNNMLP(nn.Module):
         env_state: None
         actions: batch, seq, action_dim
         """
-        is_training = actions is not None  # train or val
         bs, _ = qpos.shape
         # Image observation features and position embeddings
         all_cam_features = []
-        for cam_id, cam_name in enumerate(self.camera_names):
+        for cam_id, _cam_name in enumerate(self.camera_names):
             features, pos = self.backbones[cam_id](image[:, cam_id])
             features = features[0]  # take the last layer feature
             pos = pos[0]  # not used
@@ -231,7 +230,7 @@ def mlp(input_dim, hidden_dim, output_dim, hidden_depth):
         mods = [nn.Linear(input_dim, output_dim)]
     else:
         mods = [nn.Linear(input_dim, hidden_dim), nn.ReLU(inplace=True)]
-        for i in range(hidden_depth - 1):
+        for _i in range(hidden_depth - 1):
             mods += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU(inplace=True)]
         mods.append(nn.Linear(hidden_dim, output_dim))
     trunk = nn.Sequential(*mods)
@@ -283,7 +282,7 @@ def build(args):
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print("number of parameters: %.2fM" % (n_parameters / 1e6,))
+    print(f"number of parameters: {n_parameters / 1e6:.2f}M")
 
     return model
 
@@ -308,6 +307,6 @@ def build_cnnmlp(args):
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print("number of parameters: %.2fM" % (n_parameters / 1e6,))
+    print(f"number of parameters: {n_parameters / 1e6:.2f}M")
 
     return model

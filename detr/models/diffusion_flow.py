@@ -112,10 +112,7 @@ class DiTBlock(nn.Module):
 
     def forward(self, x, temb, memory=None, key_padding_mask=None):
         h = self.norm1(x, temb)
-        if self.mode == "cross":
-            kv = memory
-        else:
-            kv = h
+        kv = memory if self.mode == "cross" else h
         attn_out, _ = self.attn(h, kv, kv, key_padding_mask=key_padding_mask, need_weights=False)
         x = x + attn_out
         x = x + self.ff(self.norm2(x))
@@ -196,10 +193,7 @@ class DiffusionFlowModel(nn.Module):
         # --- DiT blocks ---
         blocks = []
         for idx in range(dit_layers):
-            if dit_arch == "cross_attn":
-                mode = "cross" if idx % 2 == 0 else "self"
-            else:
-                mode = "self"
+            mode = ("cross" if idx % 2 == 0 else "self") if dit_arch == "cross_attn" else "self"
             blocks.append(DiTBlock(hidden_dim, nheads, mlp_ratio, dropout, mode))
         self.blocks = nn.ModuleList(blocks)
 
@@ -350,7 +344,7 @@ def build_diffusion_flow(args):
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print("number of parameters: %.2fM" % (n_parameters / 1e6,))
+    print(f"number of parameters: {n_parameters / 1e6:.2f}M")
     return model
 
 

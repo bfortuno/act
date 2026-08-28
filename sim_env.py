@@ -325,7 +325,7 @@ def test_sim_teleop():
     plt_img = ax.imshow(ts.observation["images"]["angle"])
     plt.ion()
 
-    for t in range(1000):
+    for _t in range(1000):
         action = get_action(master_bot_left, master_bot_right)
         ts = env.step(action)
         episode.append(ts)

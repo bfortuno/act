@@ -75,7 +75,7 @@ class PickAndTransferPolicy(BasePolicy):
 
         box_info = np.array(ts_first.observation["env_state"])
         box_xyz = box_info[:3]
-        box_quat = box_info[3:]
+        box_info[3:]
         # print(f"Generate trajectory for {box_xyz=}")
 
         gripper_pick_quat = Quaternion(init_mocap_pose_right[3:])
@@ -189,11 +189,11 @@ class InsertionPolicy(BasePolicy):
 
         peg_info = np.array(ts_first.observation["env_state"])[:7]
         peg_xyz = peg_info[:3]
-        peg_quat = peg_info[3:]
+        peg_info[3:]
 
         socket_info = np.array(ts_first.observation["env_state"])[7:]
         socket_xyz = socket_info[:3]
-        socket_quat = socket_info[3:]
+        socket_info[3:]
 
         gripper_pick_quat_right = Quaternion(init_mocap_pose_right[3:])
         gripper_pick_quat_right = gripper_pick_quat_right * Quaternion(
@@ -322,7 +322,7 @@ def test_policy(task_name):
             plt.ion()
 
         policy = PickAndTransferPolicy(inject_noise)
-        for step in range(episode_len):
+        for _step in range(episode_len):
             action = policy(ts)
             ts = env.step(action)
             episode.append(ts)

@@ -22,12 +22,12 @@ def load_hdf5(dataset_dir, dataset_name):
         exit()
 
     with h5py.File(dataset_path, "r") as root:
-        is_sim = root.attrs["sim"]
+        root.attrs["sim"]
         qpos = root["/observations/qpos"][()]
         qvel = root["/observations/qvel"][()] if "/observations/qvel" in root else None
         action = root["/action"][()]
         image_dict = dict()
-        for cam_name in root["/observations/images/"].keys():
+        for cam_name in root["/observations/images/"]:
             image_dict[cam_name] = root[f"/observations/images/{cam_name}"][()]
 
     return qpos, qvel, action, image_dict
@@ -51,7 +51,7 @@ def save_videos(video, dt, video_path=None):
         w = w * len(cam_names)
         fps = int(1 / dt)
         out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-        for ts, image_dict in enumerate(video):
+        for _ts, image_dict in enumerate(video):
             images = []
             for cam_name in cam_names:
                 image = image_dict[cam_name]
