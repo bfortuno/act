@@ -40,9 +40,9 @@ flowchart TD
     xt[/"noisy chunk x_t (B, T, A)"/] --> ae["action encoder<br/>Linear + sin(flow-t) -&gt; MLP<br/>+ learned per-step pos embed"]
     ae --> at["action tokens<br/>(B, T, D)"]
 
-    ft[/"flow timestep t"/] --> te["bucketize -&gt; sinusoid -&gt; MLP"] --> temb(["adaLN scale/shift"])
+    ft[/"flow timestep t"/] --> te["bucketize -&gt; sinusoid -&gt; MLP"] --> temb(["adaLN-zero<br/>shift/scale/gate"])
 
-    vis --> dit["DiT blocks x L<br/>(adaLN every block)"]
+    vis --> dit["DiT blocks x L<br/>(adaLN-zero, identity at init)"]
     st --> dit
     at --> dit
     temb -.-> dit
@@ -64,11 +64,19 @@ flowchart TD
   timestep, fused by a 2-layer MLP, plus a learned per-step positional embedding
   (`add_pos_embed`).
 - **Timestep conditioning**: the flow timestep is bucketized (`num_timestep_buckets =
-  1000`), sinusoidally embedded, MLP'd, and injected as **adaLN** (scale+shift, not
-  zero-init, no gate) on the pre-attention norm of every DiT block and once more before
-  the output head.
-- **Output**: `AdaLN` + `Linear(D, A)` on the action-token positions → predicted
-  velocity.
+  1000`), sinusoidally embedded, MLP'd, and injected as **adaLN-zero** — each DiT
+  sub-layer (attention *and* FF) is `x = x + gate · sublayer(LayerNorm(x)·(1+scale) +
+  shift)`, with `(shift, scale, gate)` predicted from the timestep embedding by a
+  **zero-initialised** linear. So every block is an identity map at init; the output
+  head is zero-init too (model predicts `v = 0` at init). This is the standard
+  Peebles-DiT recipe — it matters here because the useful training budget is small.
+- **Output**: final `AdaLN` (shift/scale only) + zero-init `Linear(D, A)` on the
+  action-token positions → predicted velocity.
+- **Gripper**: the last channel of each (bimanual) arm block is a near-binary {0,1}
+  open/close command, passed through un-normalized by `ee_transforms.normalizable_mask`.
+  With `gripper_rescale` (on for `--task_space`) it is remapped [0,1]→[-1,1] around the
+  Gaussian flow path and back on sampling, so MSE-on-velocity stops mode-averaging the
+  grasp/release transition toward 0.5.
 
 ### `--dit_arch`: two conditioning designs to compare
 
@@ -124,9 +132,10 @@ loss      = masked_MSE(v_pred, v_target)  # padded chunk steps (is_pad) excluded
 `compute_loss` returns `{"loss": ...}` in training, and `{"loss": ..., "sample_mse":
 ...}` in validation — `sample_mse` is the masked MSE between the **Euler-sampled**
 action chunk and the ground truth (an end-task signal, run only at val time since it
-costs `n_inference_steps` extra forward passes). `train_bc` selects the best checkpoint
-by `loss`; `plot_history` writes `train_val_loss_seed_N.png` (train + val) and
-`train_val_sample_mse_seed_N.png` (val only).
+costs `n_inference_steps` extra forward passes). **`train_bc` selects `policy_best` by
+`sample_mse`** (the velocity `loss` converges fast but does not track rollout quality).
+`plot_history` writes `train_val_loss_seed_N.png` (train + val) and
+`train_val_sample_mse_seed_N.png` (val only) — watch the latter.
 
 Inference — explicit forward Euler, `t: 0 → 1`:
 
@@ -141,6 +150,25 @@ return x                                  # (B, T, A) normalized action chunk
 
 No classifier-free guidance. `--n_inference_steps 1` is nearly free and often works;
 raise it (4–10) if the chunk looks jerky.
+
+### Weight EMA
+
+`DiffusionFlowPolicy` keeps an EMA copy of the model (`--ema_decay`, default `0.9999`;
+`0` disables and drops the `ema.*` state). **Validation and eval sample from the EMA
+weights**, training uses the raw weights; `train_bc` calls `policy.ema_step()` after
+each optimizer step. Near-mandatory for diffusion/flow BC — raw weights give noisy
+samples no matter how long you train. Checkpoints carry both `model.*` and `ema.*`
+(≈2× size); eval `load_state_dict` is non-strict so an `--ema_decay 0` eval of an
+EMA-trained checkpoint still runs (on the raw weights).
+
+### `run_config.json`
+
+Training writes `<ckpt_dir>/run_config.json` (policy class, task-space, repr, and the
+full `policy_config`). `--eval` reads it back and **restores the architecture keys**
+(`dit_arch`, dims, `gripper_rescale`, …), printing a warning for any CLI value it
+overrides. This closes a footgun: `cross_attn` and `concat` checkpoints have *identical*
+keys, so a wrong `--dit_arch` at eval would otherwise load clean and silently run the
+wrong computation.
 
 ---
 
@@ -178,6 +206,7 @@ Added by this policy (see `detr/main.py` and `imitate_episodes.py`):
 | `--n_inference_steps` | `4` | Euler steps at sampling time |
 | `--state_dropout_prob` | `0.0` | prob of zeroing the whole proprio vector (train) |
 | `--cam_dropout_prob` | `0.0` | per-camera prob of masking that view (train) |
+| `--ema_decay` | `0.9999` | weight-EMA decay for sampling/eval; `0` disables |
 | `--nheads` | `8` | attention heads |
 | `--hidden_dim` | `512` | model width `D` |
 | `--dim_feedforward` | `2048` | DiT MLP hidden size (→ MLP ratio `= /hidden_dim`) |
@@ -250,13 +279,14 @@ Compare:
 - `__call__(qpos, image, actions=None, is_pad=None)` — ImageNet-normalizes `image`
   `(B, n_cam, 3, H, W)` internally; training (`actions is not None`) returns a dict with
   a scalar `loss`; inference returns `(B, T, A)`.
-- `configure_optimizers()` returns the stored `AdamW`.
-- Plain `state_dict` save/load — no per-class checkpoint handling.
+- `configure_optimizers()` returns the stored `AdamW`; `ema_step()` is called by
+  `train_bc` after each optimizer step.
+- `state_dict` carries `model.*` and (unless `--ema_decay 0`) `ema.*`.
 
 Consumes the dataloader output as-is: actions arrive normalized (translation channels
 z-scored, rotation/gripper passed through — `ee_transforms.normalizable_mask`), with
 per-chunk-step stats for `delta` / `relative`. Nothing in `utils.py` or
-`ee_transforms.py` needed changes.
+`ee_transforms.py` needed changes (the gripper [-1,1] remap lives inside the model).
 
 ---
 
