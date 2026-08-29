@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import json
 import os
 import pickle
 from copy import deepcopy
@@ -109,6 +110,8 @@ def main(args):
             "n_inference_steps": args["n_inference_steps"],
             "state_dropout_prob": args["state_dropout_prob"],
             "cam_dropout_prob": args["cam_dropout_prob"],
+            "gripper_rescale": task_space,  # last channel of each arm block is the {0,1} gripper
+            "ema_decay": args["ema_decay"],
             "dropout": 0.1,
             "lr_backbone": lr_backbone,
             "backbone": backbone,
@@ -143,6 +146,36 @@ def main(args):
     }
 
     if is_eval:
+        # architecture is fixed by training, not by the eval CLI: pull it back from
+        # run_config.json so e.g. a wrong --dit_arch can't silently load a valid-looking
+        # checkpoint and run the wrong computation.
+        rc_path = os.path.join(ckpt_dir, "run_config.json")
+        if os.path.isfile(rc_path):
+            with open(rc_path) as f:
+                saved_pc = json.load(f).get("policy_config", {})
+            arch_keys = (
+                "dit_arch",
+                "hidden_dim",
+                "dim_feedforward",
+                "nheads",
+                "dit_layers",
+                "state_dim",
+                "action_dim",
+                "num_queries",
+                "gripper_rescale",
+                "ema_decay",
+            )
+            for k in arch_keys:
+                if k in saved_pc:
+                    if k in policy_config and policy_config[k] != saved_pc[k]:
+                        print(
+                            f"[run_config] overriding {k}: CLI={policy_config[k]!r} -> "
+                            f"trained={saved_pc[k]!r}"
+                        )
+                    policy_config[k] = saved_pc[k]
+        else:
+            print(f"[run_config] {rc_path} not found - trusting CLI args for architecture")
+
         ckpt_names = ["policy_best.ckpt"]
         results = []
         for ckpt_name in ckpt_names:
@@ -173,6 +206,22 @@ def main(args):
     stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
     with open(stats_path, "wb") as f:
         pickle.dump(stats, f)
+
+    # record the exact architecture/repr this run trained, so --eval reconstructs it
+    with open(os.path.join(ckpt_dir, "run_config.json"), "w") as f:
+        json.dump(
+            {
+                "policy_class": policy_class,
+                "task_space": task_space,
+                "action_repr": action_repr,
+                "rot_repr": rot_repr,
+                "chunk_size": args["chunk_size"],
+                "policy_config": policy_config,
+            },
+            f,
+            indent=2,
+            default=str,
+        )
 
     best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info
@@ -230,8 +279,14 @@ def eval_bc(config, ckpt_name, save_episode=True):
     # load policy and stats
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
     policy = make_policy(policy_class, policy_config)
-    loading_status = policy.load_state_dict(torch.load(ckpt_path))
-    print(loading_status)
+    loading_status = policy.load_state_dict(torch.load(ckpt_path), strict=False)
+    if loading_status.missing_keys or loading_status.unexpected_keys:
+        print(
+            f"load: {len(loading_status.missing_keys)} missing, "
+            f"{len(loading_status.unexpected_keys)} unexpected keys"
+        )
+    else:
+        print("load: <All keys matched successfully>")
     policy.cuda()
     policy.eval()
     print(f"Loaded: {ckpt_path}")
@@ -438,8 +493,14 @@ def eval_bc_task_space(config, ckpt_name, save_episode=True):
 
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
     policy = make_policy(policy_class, policy_config)
-    loading_status = policy.load_state_dict(torch.load(ckpt_path))
-    print(loading_status)
+    loading_status = policy.load_state_dict(torch.load(ckpt_path), strict=False)
+    if loading_status.missing_keys or loading_status.unexpected_keys:
+        print(
+            f"load: {len(loading_status.missing_keys)} missing, "
+            f"{len(loading_status.unexpected_keys)} unexpected keys"
+        )
+    else:
+        print("load: <All keys matched successfully>")
     policy.cuda()
     policy.eval()
     print(f"Loaded: {ckpt_path}")
@@ -619,11 +680,14 @@ def train_bc(train_dataloader, val_dataloader, config):
             epoch_summary = compute_dict_mean(epoch_dicts)
             validation_history.append(epoch_summary)
 
-            epoch_val_loss = epoch_summary["loss"]
+            # select on the sampled-action MSE when the policy reports it (DiffusionFlow);
+            # the flow-matching velocity `loss` does not track rollout quality.
+            sel_key = "sample_mse" if "sample_mse" in epoch_summary else "loss"
+            epoch_val_loss = epoch_summary[sel_key]
             if epoch_val_loss < min_val_loss:
                 min_val_loss = epoch_val_loss
                 best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
-        print(f"Val loss:   {epoch_val_loss:.5f}")
+        print(f"Val {sel_key}: {epoch_val_loss:.5f}")
         summary_string = ""
         for k, v in epoch_summary.items():
             summary_string += f"{k}: {v.item():.3f} "
@@ -639,6 +703,8 @@ def train_bc(train_dataloader, val_dataloader, config):
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
+            if hasattr(policy, "ema_step"):
+                policy.ema_step()
             train_history.append(detach_dict(forward_dict))
         epoch_summary = compute_dict_mean(
             train_history[(batch_idx + 1) * epoch : (batch_idx + 1) * (epoch + 1)]
@@ -780,6 +846,13 @@ if __name__ == "__main__":
         type=float,
         default=0.0,
         help="per-camera prob of masking that view during training (DiffusionFlow)",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        action="store",
+        type=float,
+        default=0.9999,
+        help="weight-EMA decay for DiffusionFlow sampling/eval (0 disables)",
     )
 
     # task-space (end-effector) training

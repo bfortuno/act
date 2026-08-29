@@ -79,20 +79,27 @@ class TimestepEncoder(nn.Module):
 
 
 class AdaLN(nn.Module):
-    """adaLN (scale + shift, no gate, not zero-init) - gr00t dit.py:74-97."""
+    """adaLN-zero: LayerNorm modulated by (shift, scale) plus a residual `gate`, all
+    predicted from the timestep embedding. `proj` is zero-initialised, so at init
+    shift = scale = gate = 0 and the sub-layer this wraps is an identity map
+    (Peebles & Xie, "Scalable Diffusion Models with Transformers")."""
 
     def __init__(self, hidden_dim):
         super().__init__()
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        self.proj = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, 2 * hidden_dim))
+        self.proj = nn.Linear(hidden_dim, 3 * hidden_dim)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
 
     def forward(self, x, temb):
-        scale, shift = self.proj(temb).chunk(2, dim=-1)
-        return self.norm(x) * (1 + scale[:, None]) + shift[:, None]
+        shift, scale, gate = self.proj(F.silu(temb)).chunk(3, dim=-1)
+        mod = self.norm(x) * (1 + scale[:, None]) + shift[:, None]
+        return mod, gate[:, None]
 
 
 class DiTBlock(nn.Module):
-    """adaLN(attn) + LN(FF) residual block. mode: 'self' or 'cross'."""
+    """adaLN-zero(attn) + adaLN-zero(FF) residual block. mode: 'self' or 'cross'.
+    With zero-init adaLN every block starts as x -> x."""
 
     def __init__(self, hidden_dim, n_heads, mlp_ratio, dropout, mode):
         super().__init__()
@@ -100,7 +107,7 @@ class DiTBlock(nn.Module):
         self.mode = mode
         self.norm1 = AdaLN(hidden_dim)
         self.attn = nn.MultiheadAttention(hidden_dim, n_heads, dropout=dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.norm2 = AdaLN(hidden_dim)
         inner = int(hidden_dim * mlp_ratio)
         self.ff = nn.Sequential(
             nn.Linear(hidden_dim, inner),
@@ -111,11 +118,12 @@ class DiTBlock(nn.Module):
         )
 
     def forward(self, x, temb, memory=None, key_padding_mask=None):
-        h = self.norm1(x, temb)
-        kv = memory if self.mode == "cross" else h
-        attn_out, _ = self.attn(h, kv, kv, key_padding_mask=key_padding_mask, need_weights=False)
-        x = x + attn_out
-        x = x + self.ff(self.norm2(x))
+        mod1, gate1 = self.norm1(x, temb)
+        kv = memory if self.mode == "cross" else mod1
+        attn_out, _ = self.attn(mod1, kv, kv, key_padding_mask=key_padding_mask, need_weights=False)
+        x = x + gate1 * attn_out
+        mod2, gate2 = self.norm2(x, temb)
+        x = x + gate2 * self.ff(mod2)
         return x
 
 
@@ -141,6 +149,7 @@ class DiffusionFlowModel(nn.Module):
         n_inference_steps=4,
         state_dropout_prob=0.0,
         cam_dropout_prob=0.0,
+        gripper_rescale=False,
         noise_beta_alpha=1.5,
         noise_beta_beta=1.0,
         noise_s=0.999,
@@ -159,6 +168,11 @@ class DiffusionFlowModel(nn.Module):
         self.cam_dropout_prob = cam_dropout_prob
         self.noise_s = noise_s
         self.num_timestep_buckets = num_timestep_buckets
+        # near-binary {0,1} gripper channels routed through the Gaussian flow path get
+        # mode-averaged; rescale them to [-1, 1] for the flow and undo it on sampling.
+        # Gripper is always the last channel of each (bimanual) arm block.
+        self.gripper_rescale = gripper_rescale
+        self.gripper_idx = [action_dim // 2 - 1, action_dim - 1]
         self.register_buffer(
             "_beta_ab", torch.tensor([noise_beta_alpha, noise_beta_beta]), persistent=False
         )
@@ -199,6 +213,9 @@ class DiffusionFlowModel(nn.Module):
 
         self.norm_out = AdaLN(hidden_dim)
         self.head = nn.Linear(hidden_dim, action_dim)
+        # zero-init output head: the model predicts v = 0 at init (adaLN-zero recipe)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
 
     # ------------------------------------------------------------------
     def _beta_dist(self):
@@ -276,14 +293,17 @@ class DiffusionFlowModel(nn.Module):
             else:
                 h = blk(h, temb, key_padding_mask=self_kpm)
 
-        h = self.norm_out(h[:, -T:], temb)
+        h, _ = self.norm_out(h[:, -T:], temb)  # final adaLN modulation (gate unused, no residual)
         return self.head(h)
 
     # ------------------------------------------------------------------
     def compute_loss(self, qpos, image, actions, is_pad):
         state_token, vis_tokens, vis_kpm = self.encode_obs(qpos, image, self.training)
 
-        x1 = actions  # (B, T, action_dim)
+        x1 = actions  # (B, T, action_dim); normalized by the dataloader
+        if self.gripper_rescale:
+            x1 = x1.clone()
+            x1[..., self.gripper_idx] = x1[..., self.gripper_idx] * 2.0 - 1.0  # [0,1] -> [-1,1]
         bs, T, _ = x1.shape
         x0 = torch.randn_like(x1)
         u = self._beta_dist().sample((bs,)).to(x1.device)
@@ -311,8 +331,9 @@ class DiffusionFlowModel(nn.Module):
         return out
 
     def _euler_sample(self, state_token, vis_tokens):
-        """Forward-Euler integrate the velocity field from Gaussian noise. No dropout /
-        camera mask (obs must be encoded with training=False)."""
+        """Forward-Euler integrate the velocity field from Gaussian noise. Returns the
+        raw model space (gripper in [-1,1] when gripper_rescale). No dropout / camera
+        mask (obs must be encoded with training=False)."""
         bs = state_token.shape[0]
         x = torch.randn(bs, self.num_queries, self.action_dim, device=state_token.device)
         dt = 1.0 / self.n_inference_steps
@@ -324,7 +345,11 @@ class DiffusionFlowModel(nn.Module):
     @torch.no_grad()
     def sample(self, qpos, image):
         state_token, vis_tokens, _ = self.encode_obs(qpos, image, training=False)
-        return self._euler_sample(state_token, vis_tokens)
+        x = self._euler_sample(state_token, vis_tokens)
+        if self.gripper_rescale:
+            x = x.clone()
+            x[..., self.gripper_idx] = (x[..., self.gripper_idx] + 1.0) / 2.0  # [-1,1] -> [0,1]
+        return x
 
     def forward(self, qpos, image, actions=None, is_pad=None):
         if actions is not None:
@@ -355,6 +380,7 @@ def build_diffusion_flow(args):
         n_inference_steps=getattr(args, "n_inference_steps", 4),
         state_dropout_prob=getattr(args, "state_dropout_prob", 0.0),
         cam_dropout_prob=getattr(args, "cam_dropout_prob", 0.0),
+        gripper_rescale=getattr(args, "gripper_rescale", False),
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -396,15 +422,26 @@ if __name__ == "__main__":
             for sdp, cdp in ((0.0, 0.0), (0.5, 0.5)):
                 m = build_diffusion_flow(
                     _args(
-                        state_dim, dit_arch=dit_arch, state_dropout_prob=sdp, cam_dropout_prob=cdp
+                        state_dim,
+                        dit_arch=dit_arch,
+                        state_dropout_prob=sdp,
+                        cam_dropout_prob=cdp,
+                        gripper_rescale=True,
                     )
                 )
                 B, T = 2, 16
                 qpos = torch.randn(B, state_dim)
                 img = torch.randn(B, len(cams), 3, 480, 640)
-                act = torch.randn(B, T, state_dim)
+                act = torch.rand(B, T, state_dim)  # gripper channels want [0,1]
                 is_pad = torch.zeros(B, T, dtype=torch.bool)
                 is_pad[0, 10:] = True
+
+                # adaLN-zero: every DiT block is identity and the head predicts 0 at init
+                m.eval()
+                with torch.no_grad():
+                    st, vt, _ = m.encode_obs(qpos, img, training=False)
+                    v0 = m.denoise(torch.randn(B, T, state_dim), torch.rand(B), st, vt, None)
+                assert v0.abs().max() < 1e-5, ("head not zero at init", v0.abs().max().item())
 
                 m.train()
                 out = m.compute_loss(qpos, img, act, is_pad)
@@ -414,8 +451,16 @@ if __name__ == "__main__":
                 m.eval()
                 s = m.sample(qpos, img)
                 assert s.shape == (B, m.num_queries, state_dim), s.shape
+                assert torch.isfinite(s).all()
+                # untrained -> _euler_sample returns ~N(0,1); the [-1,1]->[0,1] un-rescale
+                # shifts the gripper channels to ~mean 0.5 (without it they'd sit near 0)
+                g = s[..., m.gripper_idx]
+                assert 0.2 < g.mean() < 0.8, ("gripper rescale not applied?", g.mean().item())
+                out2 = m.compute_loss(qpos, img, act, is_pad)  # eval -> has sample_mse
+                assert "sample_mse" in out2 and torch.isfinite(out2["sample_mse"])
                 print(
                     f"ok  {dit_arch:10s} state_dim={state_dim:2d} "
-                    f"sdp={sdp} cdp={cdp}  loss={out['loss'].item():.4f}"
+                    f"sdp={sdp} cdp={cdp}  loss={out['loss'].item():.4f} "
+                    f"sample_mse={out2['sample_mse'].item():.4f}"
                 )
     print("all diffusion_flow self-tests passed")

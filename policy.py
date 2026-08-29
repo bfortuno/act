@@ -1,4 +1,7 @@
+import copy
+
 import IPython
+import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from torch.nn import functional as F
@@ -83,21 +86,47 @@ class DiffusionFlowPolicy(nn.Module):
         self.model = model
         self.optimizer = optimizer
         self.num_queries = model.num_queries
+        # weight EMA: sampling/eval use the EMA copy (standard for diffusion/flow BC).
+        self.ema_decay = float(args_override.get("ema_decay", 0.9999))
+        if self.ema_decay > 0:
+            self.ema = copy.deepcopy(self.model)
+            self.ema.requires_grad_(False)
+        else:
+            self.ema = None
         print(
             f"DiffusionFlow: dit_arch={model.dit_arch} num_queries={model.num_queries} "
             f"n_inference_steps={model.n_inference_steps} "
-            f"state_dropout={model.state_dropout_prob} cam_dropout={model.cam_dropout_prob}"
+            f"state_dropout={model.state_dropout_prob} cam_dropout={model.cam_dropout_prob} "
+            f"gripper_rescale={model.gripper_rescale} ema_decay={self.ema_decay}"
         )
+
+    @torch.no_grad()
+    def ema_step(self):
+        if self.ema is None:
+            return
+        d = self.ema_decay
+        for pe, pm in zip(self.ema.parameters(), self.model.parameters()):
+            pe.mul_(d).add_(pm.detach(), alpha=1.0 - d)
+        for be, bm in zip(self.ema.buffers(), self.model.buffers()):
+            be.copy_(bm)
+
+    def _net(self):
+        """EMA weights for val/eval, raw weights while training."""
+        if self.ema is not None and not self.training:
+            self.ema.eval()
+            return self.ema
+        return self.model
 
     def __call__(self, qpos, image, actions=None, is_pad=None):
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         image = normalize(image)
-        if actions is not None:  # training time
-            actions = actions[:, : self.model.num_queries]
-            is_pad = is_pad[:, : self.model.num_queries]
-            return self.model.compute_loss(qpos, image, actions, is_pad)
+        net = self._net()
+        if actions is not None:  # training / validation
+            actions = actions[:, : self.num_queries]
+            is_pad = is_pad[:, : self.num_queries]
+            return net.compute_loss(qpos, image, actions, is_pad)
         else:  # inference time
-            return self.model.sample(qpos, image)  # (bs, num_queries, action_dim)
+            return net.sample(qpos, image)  # (bs, num_queries, action_dim)
 
     def configure_optimizers(self):
         return self.optimizer

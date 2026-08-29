@@ -143,6 +143,7 @@ def get_args_parser():
     parser.add_argument("--n_inference_steps", action="store", type=int, default=4)
     parser.add_argument("--state_dropout_prob", action="store", type=float, default=0.0)
     parser.add_argument("--cam_dropout_prob", action="store", type=float, default=0.0)
+    parser.add_argument("--ema_decay", action="store", type=float, default=0.9999)
 
     return parser
 
