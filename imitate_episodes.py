@@ -671,16 +671,27 @@ def train_bc(train_dataloader, val_dataloader, config):
 
 
 def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
-    # save training curves
-    for key in train_history[0]:
+    # save training curves; a key may be present in only one of the two histories
+    # (e.g. DiffusionFlow reports `sample_mse` during validation only)
+    keys = list(train_history[0].keys())
+    for k in validation_history[0]:
+        if k not in keys:
+            keys.append(k)
+    for key in keys:
         plot_path = os.path.join(ckpt_dir, f"train_val_{key}_seed_{seed}.png")
         plt.figure()
-        train_values = [summary[key].item() for summary in train_history]
-        val_values = [summary[key].item() for summary in validation_history]
-        plt.plot(np.linspace(0, num_epochs - 1, len(train_history)), train_values, label="train")
-        plt.plot(
-            np.linspace(0, num_epochs - 1, len(validation_history)), val_values, label="validation"
-        )
+        if key in train_history[0]:
+            train_values = [summary[key].item() for summary in train_history]
+            plt.plot(
+                np.linspace(0, num_epochs - 1, len(train_history)), train_values, label="train"
+            )
+        if key in validation_history[0]:
+            val_values = [summary[key].item() for summary in validation_history]
+            plt.plot(
+                np.linspace(0, num_epochs - 1, len(validation_history)),
+                val_values,
+                label="validation",
+            )
         # plt.ylim([-0.1, 1])
         plt.tight_layout()
         plt.legend()

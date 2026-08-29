@@ -298,19 +298,33 @@ class DiffusionFlowModel(nn.Module):
         loss = (F.mse_loss(v_pred, v_tgt, reduction="none") * m).sum() / (
             m.sum() * self.action_dim + 1e-6
         )
-        return {"loss": loss, "v_mse": loss.detach()}
+        out = {"loss": loss}
+        # Validation-only diagnostic: how far the actually-sampled chunk lands from the
+        # ground truth (an end-task signal, unlike the training velocity MSE). Skipped
+        # in training since it costs n_inference_steps extra forward passes per batch.
+        if not self.training:
+            with torch.no_grad():
+                a_hat = self._euler_sample(state_token, vis_tokens)
+            out["sample_mse"] = (F.mse_loss(a_hat, x1, reduction="none") * m).sum() / (
+                m.sum() * self.action_dim + 1e-6
+            )
+        return out
+
+    def _euler_sample(self, state_token, vis_tokens):
+        """Forward-Euler integrate the velocity field from Gaussian noise. No dropout /
+        camera mask (obs must be encoded with training=False)."""
+        bs = state_token.shape[0]
+        x = torch.randn(bs, self.num_queries, self.action_dim, device=state_token.device)
+        dt = 1.0 / self.n_inference_steps
+        for i in range(self.n_inference_steps):
+            t = torch.full((bs,), i * dt, device=state_token.device)
+            x = x + dt * self.denoise(x, t, state_token, vis_tokens, None)
+        return x
 
     @torch.no_grad()
     def sample(self, qpos, image):
         state_token, vis_tokens, _ = self.encode_obs(qpos, image, training=False)
-        bs = qpos.shape[0]
-        x = torch.randn(bs, self.num_queries, self.action_dim, device=qpos.device)
-        dt = 1.0 / self.n_inference_steps
-        for i in range(self.n_inference_steps):
-            t = torch.full((bs,), i * dt, device=qpos.device)
-            v = self.denoise(x, t, state_token, vis_tokens, None)
-            x = x + dt * v
-        return x
+        return self._euler_sample(state_token, vis_tokens)
 
     def forward(self, qpos, image, actions=None, is_pad=None):
         if actions is not None:
