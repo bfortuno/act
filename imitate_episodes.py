@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import ee_transforms
 from constants import CAMERA_HEIGHT, CAMERA_WIDTH, DT, PUPPET_GRIPPER_JOINT_OPEN
-from policy import ACTPolicy, CNNMLPPolicy, DiffusionFlowPolicy
+from policy import ACTPolicy, CNNMLPPolicy, DiffusionFlowPolicy, DiffusionPolicy
 from sim_env import BOX_POSE
 from utils import (  # robot functions  # helper functions
     compute_dict_mean,
@@ -119,6 +119,60 @@ def main(args):
             "state_dim": state_dim,
             "action_dim": action_dim,
         }
+    elif policy_class == "DiffusionPolicy":
+        if args.get("chunk_size") is None:
+            raise ValueError("--chunk_size is required with --policy_class DiffusionPolicy")
+        # --n_inference_steps is shared with DiffusionFlow, whose Euler sampler defaults
+        # to 4. For DDPM/DDIM that few is broken (stock Diffusion Policy uses 100-step
+        # DDPM); silently bump anything implausibly low to 100 so a forgotten flag gives
+        # a valid rollout. Pass an explicit value >= 20 for deliberate few-step DDIM.
+        dp_n_inference_steps = args["n_inference_steps"]
+        if dp_n_inference_steps < 20:
+            print(
+                f"[DiffusionPolicy] --n_inference_steps={dp_n_inference_steps} is too low "
+                f"(that flag defaults to 4 for DiffusionFlow); using 100 for DDPM sampling. "
+                f"Pass --n_inference_steps >= 20 explicitly for few-step DDIM."
+            )
+            dp_n_inference_steps = 100
+        policy_config = {
+            "lr": args["lr"],
+            "num_queries": args["chunk_size"],
+            # denoiser
+            "denoiser": args["dp_denoiser"],
+            "down_dims": args["dp_down_dims"],
+            "kernel_size": args["dp_kernel_size"],
+            "n_groups": args["dp_n_groups"],
+            "diffusion_step_embed_dim": args["dp_diffusion_step_embed_dim"],
+            "obs_pool": args["dp_obs_pool"],
+            "num_kp": args["dp_num_kp"],
+            # dit denoiser reuses the DiffusionFlow DiT (built via build_diffusion_flow)
+            "dit_arch": args["dit_arch"],
+            "dit_layers": args["dit_layers"],
+            "hidden_dim": args["hidden_dim"] or 512,
+            "dim_feedforward": args["dim_feedforward"] or 2048,
+            "nheads": args["nheads"] or 8,
+            "state_dropout_prob": args["state_dropout_prob"],
+            "cam_dropout_prob": args["cam_dropout_prob"],
+            "gripper_rescale": False,  # DDPM handles bimodal gripper; clip_sample is off
+            # diffusion process
+            "num_train_timesteps": args["dp_num_train_timesteps"],
+            "beta_schedule": args["dp_beta_schedule"],
+            "prediction_type": args["dp_prediction_type"],
+            "action_scale": args["dp_action_scale"],
+            "n_inference_steps": dp_n_inference_steps,
+            "inference_scheduler": args["dp_inference_scheduler"],
+            # EMA
+            "ema_decay": args["ema_decay"],
+            "ema_power": args["ema_power"],
+            "ema_inv_gamma": args["ema_inv_gamma"],
+            "ema_min_value": args["ema_min_value"],
+            "dropout": 0.1,
+            "lr_backbone": lr_backbone,
+            "backbone": backbone,
+            "camera_names": camera_names,
+            "state_dim": state_dim,
+            "action_dim": action_dim,
+        }
     else:
         raise NotImplementedError
 
@@ -164,6 +218,19 @@ def main(args):
                 "num_queries",
                 "gripper_rescale",
                 "ema_decay",
+                # DiffusionPolicy structural keys (n_inference_steps / inference_scheduler
+                # are deliberately left tunable at eval)
+                "denoiser",
+                "down_dims",
+                "kernel_size",
+                "n_groups",
+                "diffusion_step_embed_dim",
+                "obs_pool",
+                "num_kp",
+                "num_train_timesteps",
+                "beta_schedule",
+                "prediction_type",
+                "action_scale",
             )
             for k in arch_keys:
                 if k in saved_pc:
@@ -239,13 +306,15 @@ def make_policy(policy_class, policy_config):
         policy = CNNMLPPolicy(policy_config)
     elif policy_class == "DiffusionFlow":
         policy = DiffusionFlowPolicy(policy_config)
+    elif policy_class == "DiffusionPolicy":
+        policy = DiffusionPolicy(policy_config)
     else:
         raise NotImplementedError
     return policy
 
 
 def make_optimizer(policy_class, policy):
-    if policy_class == "ACT" or policy_class == "CNNMLP" or policy_class == "DiffusionFlow":
+    if policy_class in ("ACT", "CNNMLP", "DiffusionFlow", "DiffusionPolicy"):
         optimizer = policy.configure_optimizers()
     else:
         raise NotImplementedError
@@ -377,7 +446,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
                 curr_image = get_image(ts, camera_names)
 
                 ### query policy
-                if config["policy_class"] in ("ACT", "DiffusionFlow"):
+                if config["policy_class"] in ("ACT", "DiffusionFlow", "DiffusionPolicy"):
                     if t % query_frequency == 0:
                         all_actions = policy(qpos, curr_image)
                     if temporal_agg:
@@ -852,8 +921,47 @@ if __name__ == "__main__":
         action="store",
         type=float,
         default=0.9999,
-        help="weight-EMA decay for DiffusionFlow sampling/eval (0 disables)",
+        help="weight-EMA decay for DiffusionFlow/DiffusionPolicy sampling/eval (0 disables)",
     )
+
+    # for DiffusionPolicy (CNN 1D-UNet or gr00t-DiT denoiser + DDPM)
+    parser.add_argument(
+        "--dp_denoiser", action="store", type=str, default="unet", choices=("unet", "dit")
+    )
+    parser.add_argument(
+        "--dp_down_dims", action="store", type=int, nargs="+", default=[256, 512, 1024]
+    )
+    parser.add_argument("--dp_kernel_size", action="store", type=int, default=5)
+    parser.add_argument("--dp_n_groups", action="store", type=int, default=8)
+    parser.add_argument("--dp_diffusion_step_embed_dim", action="store", type=int, default=128)
+    parser.add_argument("--dp_num_train_timesteps", action="store", type=int, default=100)
+    parser.add_argument("--dp_beta_schedule", action="store", type=str, default="squaredcos_cap_v2")
+    parser.add_argument(
+        "--dp_prediction_type",
+        action="store",
+        type=str,
+        default="epsilon",
+        choices=("epsilon", "sample"),
+    )
+    parser.add_argument("--dp_action_scale", action="store", type=float, default=4.0)
+    parser.add_argument(
+        "--dp_obs_pool",
+        action="store",
+        type=str,
+        default="spatial_softmax",
+        choices=("spatial_softmax", "avg"),
+    )
+    parser.add_argument("--dp_num_kp", action="store", type=int, default=32)
+    parser.add_argument(
+        "--dp_inference_scheduler",
+        action="store",
+        type=str,
+        default="ddim",
+        choices=("ddim", "ddpm"),
+    )
+    parser.add_argument("--ema_power", action="store", type=float, default=0.75)
+    parser.add_argument("--ema_inv_gamma", action="store", type=float, default=1.0)
+    parser.add_argument("--ema_min_value", action="store", type=float, default=0.0)
 
     # task-space (end-effector) training
     parser.add_argument(

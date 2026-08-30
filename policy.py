@@ -10,6 +10,7 @@ from detr.main import (
     build_ACT_model_and_optimizer,
     build_CNNMLP_model_and_optimizer,
     build_DiffusionFlow_model_and_optimizer,
+    build_DiffusionPolicy_model_and_optimizer,
 )
 
 e = IPython.embed
@@ -115,6 +116,76 @@ class DiffusionFlowPolicy(nn.Module):
         if self.ema is not None and not self.training:
             self.ema.eval()
             return self.ema
+        return self.model
+
+    def __call__(self, qpos, image, actions=None, is_pad=None):
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        image = normalize(image)
+        net = self._net()
+        if actions is not None:  # training / validation
+            actions = actions[:, : self.num_queries]
+            is_pad = is_pad[:, : self.num_queries]
+            return net.compute_loss(qpos, image, actions, is_pad)
+        else:  # inference time
+            return net.sample(qpos, image)  # (bs, num_queries, action_dim)
+
+    def configure_optimizers(self):
+        return self.optimizer
+
+
+class DiffusionPolicy(nn.Module):
+    """Original Diffusion Policy (Chi et al.): DDPM over the action chunk with a
+    CNN 1D-UNet (``--dp_denoiser unet``) or the gr00t-style DiT
+    (``--dp_denoiser dit``) denoiser. See detr/models/diffusion_policy.py."""
+
+    def __init__(self, args_override):
+        super().__init__()
+        model, optimizer = build_DiffusionPolicy_model_and_optimizer(args_override)
+        self.model = model
+        self.optimizer = optimizer
+        self.num_queries = model.num_queries
+
+        # Weight EMA with a power-function warmup (the decay ramps from ~0), so
+        # sampling/eval get a meaningful average even with few optimizer steps per
+        # epoch. sampling/eval use the EMA copy, training uses the raw weights.
+        self.ema_decay = float(args_override.get("ema_decay", 0.9999))  # == max decay
+        self.ema_power = float(args_override.get("ema_power", 0.75))
+        self.ema_inv_gamma = float(args_override.get("ema_inv_gamma", 1.0))
+        self.ema_min_value = float(args_override.get("ema_min_value", 0.0))
+        if self.ema_decay > 0:
+            self.ema_model = copy.deepcopy(self.model)
+            self.ema_model.requires_grad_(False)
+        else:
+            self.ema_model = None
+        self.register_buffer("ema_step_count", torch.zeros((), dtype=torch.long))
+
+        print(
+            f"DiffusionPolicy: denoiser={model.denoiser} num_queries={model.num_queries} "
+            f"obs_pool={model.obs_pool} num_kp={model.num_kp} down_dims={model.down_dims} "
+            f"num_train_timesteps={model.num_train_timesteps} pred={model.prediction_type} "
+            f"n_inference_steps={model.n_inference_steps} "
+            f"inference_scheduler={model.inference_scheduler} ema_decay={self.ema_decay}"
+        )
+
+    @torch.no_grad()
+    def ema_step(self):
+        if self.ema_model is None:
+            return
+        self.ema_step_count += 1
+        s = float(self.ema_step_count.item())
+        decay = 1.0 - (1.0 + s / self.ema_inv_gamma) ** (-self.ema_power)
+        decay = min(max(decay, self.ema_min_value), self.ema_decay)
+        for pe, pm in zip(self.ema_model.parameters(), self.model.parameters()):
+            pe.mul_(decay).add_(pm.detach(), alpha=1.0 - decay)
+        for be, bm in zip(self.ema_model.buffers(), self.model.buffers()):
+            if be.shape == bm.shape:  # skip derived buffers whose shape is input-dependent
+                be.copy_(bm)
+
+    def _net(self):
+        """EMA weights for val/eval, raw weights while training."""
+        if self.ema_model is not None and not self.training:
+            self.ema_model.eval()
+            return self.ema_model
         return self.model
 
     def __call__(self, qpos, image, actions=None, is_pad=None):

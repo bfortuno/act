@@ -2,6 +2,7 @@
 from .detr_vae import build as build_vae
 from .detr_vae import build_cnnmlp as build_cnnmlp
 from .diffusion_flow import build_diffusion_flow
+from .diffusion_policy import build_diffusion_policy
 
 
 def build_ACT_model(args):
@@ -14,3 +15,7 @@ def build_CNNMLP_model(args):
 
 def build_DiffusionFlow_model(args):
     return build_diffusion_flow(args)
+
+
+def build_DiffusionPolicy_model(args):
+    return build_diffusion_policy(args)

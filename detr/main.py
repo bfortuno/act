@@ -4,7 +4,12 @@ import argparse
 import IPython
 import torch
 
-from .models import build_ACT_model, build_CNNMLP_model, build_DiffusionFlow_model
+from .models import (
+    build_ACT_model,
+    build_CNNMLP_model,
+    build_DiffusionFlow_model,
+    build_DiffusionPolicy_model,
+)
 
 e = IPython.embed
 
@@ -145,6 +150,45 @@ def get_args_parser():
     parser.add_argument("--cam_dropout_prob", action="store", type=float, default=0.0)
     parser.add_argument("--ema_decay", action="store", type=float, default=0.9999)
 
+    # for DiffusionPolicy (CNN 1D-UNet or gr00t-DiT denoiser + DDPM)
+    parser.add_argument(
+        "--dp_denoiser", action="store", type=str, default="unet", choices=("unet", "dit")
+    )
+    parser.add_argument(
+        "--dp_down_dims", action="store", type=int, nargs="+", default=[256, 512, 1024]
+    )
+    parser.add_argument("--dp_kernel_size", action="store", type=int, default=5)
+    parser.add_argument("--dp_n_groups", action="store", type=int, default=8)
+    parser.add_argument("--dp_diffusion_step_embed_dim", action="store", type=int, default=128)
+    parser.add_argument("--dp_num_train_timesteps", action="store", type=int, default=100)
+    parser.add_argument("--dp_beta_schedule", action="store", type=str, default="squaredcos_cap_v2")
+    parser.add_argument(
+        "--dp_prediction_type",
+        action="store",
+        type=str,
+        default="epsilon",
+        choices=("epsilon", "sample"),
+    )
+    parser.add_argument("--dp_action_scale", action="store", type=float, default=4.0)
+    parser.add_argument(
+        "--dp_obs_pool",
+        action="store",
+        type=str,
+        default="spatial_softmax",
+        choices=("spatial_softmax", "avg"),
+    )
+    parser.add_argument("--dp_num_kp", action="store", type=int, default=32)
+    parser.add_argument(
+        "--dp_inference_scheduler",
+        action="store",
+        type=str,
+        default="ddim",
+        choices=("ddim", "ddpm"),
+    )
+    parser.add_argument("--ema_power", action="store", type=float, default=0.75)
+    parser.add_argument("--ema_inv_gamma", action="store", type=float, default=1.0)
+    parser.add_argument("--ema_min_value", action="store", type=float, default=0.0)
+
     return parser
 
 
@@ -188,6 +232,36 @@ def build_DiffusionFlow_model_and_optimizer(args_override):
         setattr(args, k, v)
 
     model = build_DiffusionFlow_model(args)
+    model.cuda()
+
+    param_dicts = [
+        {
+            "params": [
+                p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad
+            ]
+        },
+        {
+            "params": [
+                p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad
+            ],
+            "lr": args.lr_backbone,
+        },
+    ]
+    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+
+    return model, optimizer
+
+
+def build_DiffusionPolicy_model_and_optimizer(args_override):
+    parser = argparse.ArgumentParser(
+        "DETR training and evaluation script", parents=[get_args_parser()]
+    )
+    args = parser.parse_args()
+
+    for k, v in args_override.items():
+        setattr(args, k, v)
+
+    model = build_DiffusionPolicy_model(args)
     model.cuda()
 
     param_dicts = [
