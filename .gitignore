@@ -141,3 +141,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+# lerobot_bridge generated artifacts
+lerobot_bridge/_fixtures/
+lerobot_bridge/outputs/

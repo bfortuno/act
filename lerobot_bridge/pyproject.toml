@@ -1,0 +1,53 @@
+[project]
+name = "lerobot-bridge"
+version = "0.1.0"
+description = "Run upstream LeRobot ACT / Diffusion Policy on the ACT-fork sim datasets"
+readme = "README.md"
+# LeRobot >=0.6 (dataset v3) requires Python >=3.12 and numpy>=2.
+# This is a deliberately separate uv project: the root ACT repo stays on
+# Python 3.8 / torch 2.0 / numpy<2 and is never touched by `uv sync` here.
+requires-python = ">=3.12"
+dependencies = [
+    "lerobot[dataset,training,evaluation,diffusion]==0.6.1",
+    "h5py>=3.11",
+    "numpy>=2.0,<2.3",
+    "scipy>=1.13",
+    "pyquaternion>=0.9.9",
+    "ipython",  # only so the repo-root `utils.py` (single source of truth for norm stats) imports
+    "imageio[ffmpeg]>=2.34",  # eval_sim.py rollout videos
+]
+
+[dependency-groups]
+# Simulation eval (Loop 5). mujoco 2.3.7 has no cp312 wheel, so the bridge
+# uses a current mujoco/dm-control; if MJCF/asset loading diverges from the
+# root repo, fall back to the two-process eval (see lerobot_bridge/README.md).
+sim = [
+    # dm-control and mujoco must be a matched pair - let dm-control pin its mujoco.
+    "dm-control==1.0.28",
+    "mujoco==3.3.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B905"]
+
+[tool.ruff.lint.isort]
+# Modules pulled from the repo root via `_shared` (sys.path insert). Grouping them
+# first-party keeps `_shared` (sorts before `constants`/`ee_*`) ahead of them, so the
+# path is set before they import. `_eval_utils` sorts before `_shared` but bootstraps
+# `_shared` itself.
+known-first-party = [
+    "_shared", "_eval_utils", "ee_repr_dataset",
+    "constants", "ee_transforms", "ee_sim_env", "sim_env", "utils",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
