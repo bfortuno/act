@@ -44,6 +44,22 @@ POLICY_CLS = {
 MAX_ATTEMPTS_FACTOR = 10
 
 
+# strict success: max reward on every one of the last HOLD_STEPS steps (0.5 s at 50 Hz)
+HOLD_STEPS = 25
+
+
+def held_to_end(rewards, max_reward) -> bool:
+    """Strict success: the task's final stage still holds over the last ``HOLD_STEPS``.
+
+    The env reward only says the final stage (e.g. cube held by the receiving gripper,
+    off the table) is true *right now*; ``max(rewards) == max_reward`` therefore also
+    accepts episodes where the object is dropped afterwards. Requiring it from the first
+    time it is reached would be too strict: the contact-based reward flickers for a few
+    steps around the handover even in clean episodes, but not once the object is held.
+    """
+    return bool((np.asarray(rewards)[-HOLD_STEPS:] == max_reward).all())
+
+
 def record(
     task_name: str,
     out_dir: Path,
@@ -106,7 +122,7 @@ def record(
         t0 = time.time()
         ts = env.reset()
         policy = POLICY_CLS[task_name](False)  # inject_noise=False, as record_sim_episodes.py
-        episode_max_reward = 0
+        rewards = []
         for _step in range(episode_len):
             action = np.asarray(policy(ts))
             # obs[t] is the observation the policy saw when it produced action[t]
@@ -121,10 +137,10 @@ def record(
                 frame[f"observation.images.{cam}"] = ts.observation["images"][cam]
             ds.add_frame(frame)
             ts = env.step(action)
-            episode_max_reward = max(episode_max_reward, ts.reward)
+            rewards.append(ts.reward)
         t_roll = time.time() - t0
 
-        ok = episode_max_reward == max_reward
+        ok = held_to_end(rewards, max_reward)
         if only_success and not ok:
             ds.clear_episode_buffer()
             print(f"  rollout {attempts}: Failed, discarded  (rollout {t_roll:.1f}s)")
@@ -167,7 +183,8 @@ def main() -> None:
     p.add_argument(
         "--only-success",
         action="store_true",
-        help="discard failed rollouts and keep going until --num-episodes are saved",
+        help="discard rollouts that fail or drop the object after succeeding, and keep going "
+        "until --num-episodes are saved",
     )
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()

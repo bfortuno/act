@@ -38,12 +38,15 @@ and per-episode lengths. `--verify` reloads and checks round-trip fidelity.
 ```bash
 MUJOCO_GL=egl uv run --group sim python record_dataset.py \
     --task-name sim_transfer_cube_scripted --out-dir outputs/data/ts_cube \
-    --num-episodes 400 --seed 0   # --only-success to discard failed rollouts
+    --num-episodes 400 --seed 0 --only-success
 ```
 
 Runs the scripted policy in `ee_sim_env` and streams each step into the dataset:
 same stored quantities as `record_sim_episodes.py --task_space` + the converter
 (task-space only), same sidecar with `source_dir: null` plus per-episode `success`.
+Success is strict: the max reward must hold on every one of the last 25 steps
+(an episode that hands the cube over and later drops it is a failure);
+`--only-success` discards everything else and keeps rolling out.
 Norm stats for these datasets are computed from the dataset's own parquet columns.
 The rollout uses this project's mujoco through `_sim_compat` (see the sim-fidelity
 caveat below).
