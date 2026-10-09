@@ -33,6 +33,21 @@ Stores canonical raw poses (16-dim task-space or 14-dim joint-space) + camera
 video; a sidecar `meta/act_bridge.json` carries the task-space flag, source dir
 and per-episode lengths. `--verify` reloads and checks round-trip fidelity.
 
+### 1b. Or record directly into a LeRobot dataset (no HDF5)
+
+```bash
+MUJOCO_GL=egl uv run --group sim python record_dataset.py \
+    --task-name sim_transfer_cube_scripted --out-dir outputs/data/ts_cube \
+    --num-episodes 400 --seed 0   # --only-success to discard failed rollouts
+```
+
+Runs the scripted policy in `ee_sim_env` and streams each step into the dataset:
+same stored quantities as `record_sim_episodes.py --task_space` + the converter
+(task-space only), same sidecar with `source_dir: null` plus per-episode `success`.
+Norm stats for these datasets are computed from the dataset's own parquet columns.
+The rollout uses this project's mujoco (see the sim-fidelity caveat below), so the
+episodes are not the ones the in-repo HDF5 recorder would produce.
+
 ### 2. Train (LeRobot ACT or Diffusion)
 
 `EEReprDataset` applies the `(rot_repr, action_repr)` transform + per-chunk-step

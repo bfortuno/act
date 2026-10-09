@@ -15,6 +15,7 @@ dependencies = [
     "pyquaternion>=0.9.9",
     "ipython",  # only so the repo-root `utils.py` (single source of truth for norm stats) imports
     "imageio[ffmpeg]>=2.34",  # eval_sim.py rollout videos
+    "matplotlib",  # only so the repo-root `scripted_policy.py` imports (record_dataset.py)
 ]
 
 [dependency-groups]
@@ -42,7 +43,8 @@ ignore = ["E501", "B905"]
 # `_shared` itself.
 known-first-party = [
     "_shared", "_eval_utils", "ee_repr_dataset",
-    "constants", "ee_transforms", "ee_sim_env", "sim_env", "utils",
+    "constants", "convert_dataset", "ee_transforms", "ee_sim_env", "scripted_policy", "sim_env",
+    "utils",
 ]
 
 [build-system]

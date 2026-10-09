@@ -14,7 +14,8 @@ import numpy as np
 
 import _shared  # noqa: F401
 import ee_transforms
-from ee_repr_dataset import EEReprDataset, load_ee_repr_stats
+from ee_repr_dataset import EEReprDataset, load_canonical_episodes, load_ee_repr_stats
+from utils import get_norm_stats, task_space_norm_stats_from_arrays
 
 
 def _unit_quat_canonical(vec16: np.ndarray) -> np.ndarray:
@@ -112,9 +113,36 @@ def check_jointspace():
     print(f"  js start= 12  state_err={q_err:.2e}  act_err={a_err:.2e}  (passthrough)")
 
 
+def check_stats_from_parquet():
+    """The HDF5-free stats path (used by ``record_dataset.py`` datasets) must reproduce
+    the HDF5-based ``get_norm_stats`` on a converted fixture."""
+    root = Path("_fixtures/ts")
+    info = json.loads((root / "meta" / "act_bridge.json").read_text())
+    episodes = load_canonical_episodes(root)
+    assert len(episodes) == info["num_episodes"], (len(episodes), info["num_episodes"])
+    for rot_repr, action_repr in (("rot6d", "relative"), ("quat", "absolute")):
+        ref = get_norm_stats(
+            info["source_dir"],
+            info["num_episodes"],
+            task_space=True,
+            action_repr=action_repr,
+            rot_repr=rot_repr,
+            chunk_size=32,
+        )
+        got = task_space_norm_stats_from_arrays(episodes, action_repr, rot_repr, 32)
+        err = max(
+            np.abs(got[k] - ref[k]).max()
+            for k in ("qpos_mean", "qpos_std", "action_mean", "action_std")
+        )
+        assert err < 1e-6, f"{rot_repr}/{action_repr} stats parity {err}"
+        print(f"  {rot_repr}/{action_repr}  stats_err={err:.2e}")
+
+
 if __name__ == "__main__":
     print("task-space rot6d/relative:")
     check_taskspace()
+    print("parquet vs HDF5 norm stats:")
+    check_stats_from_parquet()
     print("joint-space passthrough:")
     check_jointspace()
     print("Loop 2 OK")

@@ -129,19 +129,29 @@ def _clip_std(std, mask):
 
 
 def _get_task_space_norm_stats(dataset_dir, num_episodes, action_repr, rot_repr, chunk_size):
+    episodes = []
+    for episode_idx in range(num_episodes):
+        dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
+        with h5py.File(dataset_path, "r") as root:
+            qpos = root["/observations/qpos"][()]  # (T, 16) canonical
+            action = root["/action"][()]  # (T, 16) canonical
+        episodes.append((qpos, action))
+    return task_space_norm_stats_from_arrays(episodes, action_repr, rot_repr, chunk_size)
+
+
+def task_space_norm_stats_from_arrays(episodes, action_repr, rot_repr, chunk_size):
+    """Task-space norm stats from in-memory episodes: a list of (qpos, action) pairs,
+    each (T, 16) canonical. Storage-agnostic so non-HDF5 datasets can reuse the math."""
     mask = ee_transforms.normalizable_mask(rot_repr)
     D = ee_transforms.state_dim(rot_repr)
+    num_episodes = len(episodes)
 
     all_state = []  # transformed qpos, for state stats
     per_step = [[] for _ in range(chunk_size)]  # transformed action, grouped by horizon index
     flat_action = []  # transformed action, all steps pooled (absolute)
 
     canon_qpos = None
-    for episode_idx in range(num_episodes):
-        dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
-        with h5py.File(dataset_path, "r") as root:
-            qpos = root["/observations/qpos"][()]  # (T, 16) canonical
-            action = root["/action"][()]  # (T, 16) canonical
+    for qpos, action in episodes:
         canon_qpos = qpos
         T = qpos.shape[0]
         all_state.append(ee_transforms.transform_state(qpos, rot_repr))

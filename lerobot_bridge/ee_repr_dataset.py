@@ -22,12 +22,13 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 import _shared  # noqa: F401  (repo root on sys.path)
 import ee_transforms
-from utils import get_norm_stats
+from utils import get_norm_stats, task_space_norm_stats_from_arrays
 
 _STAT_KEYS = ("qpos_mean", "qpos_std", "action_mean", "action_std")
 
@@ -42,6 +43,20 @@ def stats_filename(rot_repr: str, action_repr: str, chunk_size: int) -> str:
     return f"ee_repr_stats_{rot_repr}_{action_repr}_c{chunk_size}.npz"
 
 
+def load_canonical_episodes(dataset_root: Path) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Per-episode ``(state, action)`` arrays read straight from the dataset's parquet
+    files (no video decode), in episode order."""
+    cols = ["episode_index", "frame_index", "observation.state", "action"]
+    files = sorted((dataset_root / "data").glob("*/*.parquet"))
+    df = pd.concat([pd.read_parquet(f, columns=cols) for f in files], ignore_index=True)
+    episodes = []
+    for _, ep in df.sort_values(["episode_index", "frame_index"]).groupby("episode_index"):
+        state = np.stack(ep["observation.state"].to_numpy())
+        action = np.stack(ep["action"].to_numpy())
+        episodes.append((state, action))
+    return episodes
+
+
 def compute_ee_repr_stats(
     dataset_root: Path,
     *,
@@ -50,21 +65,31 @@ def compute_ee_repr_stats(
     chunk_size: int = 32,
     overwrite: bool = False,
 ) -> dict:
-    """Run repo-root ``get_norm_stats`` against the ORIGINAL HDF5 dir (from the sidecar)
-    and cache the arrays next to the converted dataset."""
+    """Compute the repo-root norm stats and cache the arrays next to the dataset.
+
+    Converted datasets run ``get_norm_stats`` against the ORIGINAL HDF5 dir (from the
+    sidecar). Directly recorded datasets (``record_dataset.py``, no ``source_dir``) feed
+    the same math from the dataset's own parquet columns."""
     info = json.loads((dataset_root / "meta" / "act_bridge.json").read_text())
     out = dataset_root / "meta" / stats_filename(rot_repr, action_repr, chunk_size)
     if out.exists() and not overwrite:
         return load_ee_repr_stats(dataset_root, rot_repr, action_repr, chunk_size)
 
-    stats = get_norm_stats(
-        info["source_dir"],
-        info["num_episodes"],
-        task_space=info["task_space"],
-        action_repr=action_repr,
-        rot_repr=rot_repr,
-        chunk_size=chunk_size,
-    )
+    if info.get("source_dir"):
+        stats = get_norm_stats(
+            info["source_dir"],
+            info["num_episodes"],
+            task_space=info["task_space"],
+            action_repr=action_repr,
+            rot_repr=rot_repr,
+            chunk_size=chunk_size,
+        )
+    else:
+        if not info["task_space"]:
+            raise NotImplementedError("stats without a source HDF5 dir are task-space only")
+        stats = task_space_norm_stats_from_arrays(
+            load_canonical_episodes(dataset_root), action_repr, rot_repr, chunk_size
+        )
     payload = {k: np.asarray(stats[k], dtype=np.float32) for k in _STAT_KEYS}
     payload["meta"] = np.array(
         json.dumps(
