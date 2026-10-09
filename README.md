@@ -19,7 +19,7 @@ You can find all scripted/human demo for simulated environments [here](https://d
 - ``detr`` Model definitions of ACT, modified from DETR
 - ``sim_env.py`` Mujoco + DM_Control environments with joint space control
 - ``ee_sim_env.py`` Mujoco + DM_Control environments with EE space control
-- ``scripted_policy.py`` Scripted policies for sim environments
+- ``scripted_policy.py`` Scripted policies for sim environments — pick-and-handover demos are multimodal/human-like, see [README_scripted_policy.md](README_scripted_policy.md)
 - ``constants.py`` Constants shared across files
 - ``utils.py`` Utils such as data loading and helper functions
 - ``visualize_episodes.py`` Save videos from a .hdf5 dataset
@@ -99,4 +99,3 @@ You can also add ``--onscreen_render`` to see real-time rendering during evaluat
 
 For real-world data where things can be harder to model, train for at least 5000 epochs or 3-4 times the length after the loss has plateaued.
 Please refer to [tuning tips](https://docs.google.com/document/d/1FVIZfoALXg_ZkYKaYVh-qOlaXveq5CtvJHXkY25eYhs/edit?usp=sharing) for more info.
-

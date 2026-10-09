@@ -6,7 +6,7 @@ SIM_TASK_CONFIGS = {
     "sim_transfer_cube_scripted": {
         "dataset_dir": DATA_DIR + "/sim_transfer_cube_scripted",
         "num_episodes": 50,
-        "episode_len": 400,
+        "episode_len": 600,  # 12s at DT=0.02; see README_scripted_policy.md (human-pace timing)
         "camera_names": ["top", "left_wrist", "right_wrist"],
     },
     "sim_transfer_cube_human": {

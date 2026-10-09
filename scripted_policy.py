@@ -5,7 +5,7 @@ from pyquaternion import Quaternion
 from scipy.interpolate import CubicHermiteSpline
 from scipy.spatial.transform import Rotation, Slerp
 
-from constants import SIM_TASK_CONFIGS
+from constants import DT, SIM_TASK_CONFIGS
 from ee_sim_env import make_ee_sim_env
 
 e = IPython.embed
@@ -20,8 +20,19 @@ VIA_MODE_OFFSETS = {
     "arc_right": np.array([0.05, 0.0, 0.02]),
 }
 
+# Low, incommensurate frequencies (Hz) for a continuous, non-repeating idle sway, so
+# nothing is ever commanded to a perfectly frozen pose -- including during holds, where
+# real hands/arms still show small postural tremor/sway.
+_SWAY_FREQS_HZ = (0.37, 0.61)
+
 
 class BasePolicy:
+    # Idle-sway amplitude (meters), split across _SWAY_FREQS_HZ. 0.0 (default) disables
+    # it entirely -- InsertionPolicy relies on that, since a few mm of sway during the
+    # precision peg/socket dwell could push it out of tolerance. Only PickAndTransferPolicy
+    # opts in (see override below).
+    IDLE_SWAY_AMPLITUDE = 0.0
+
     def __init__(self, inject_noise=False):
         self.inject_noise = inject_noise
         self.step_count = 0
@@ -29,9 +40,21 @@ class BasePolicy:
         self.right_trajectory = None
         self.left_motion = None
         self.right_motion = None
+        self._sway_phase = None
 
     def generate_trajectory(self, ts_first):
         raise NotImplementedError
+
+    def _idle_sway(self, arm, step_count):
+        if self.IDLE_SWAY_AMPLITUDE == 0.0:
+            return np.zeros(3)
+        t = step_count * DT
+        phase = self._sway_phase[arm]  # (3, len(_SWAY_FREQS_HZ))
+        per_freq_amp = self.IDLE_SWAY_AMPLITUDE / len(_SWAY_FREQS_HZ)
+        sway = np.zeros(3)
+        for i, f in enumerate(_SWAY_FREQS_HZ):
+            sway += per_freq_amp * np.sin(2 * np.pi * f * t + phase[:, i])
+        return sway
 
     @staticmethod
     def _min_jerk(u):
@@ -101,11 +124,21 @@ class BasePolicy:
             self.generate_trajectory(ts)
             self.left_motion = self._build_motion(self.left_trajectory)
             self.right_motion = self._build_motion(self.right_trajectory)
+            self._sway_phase = {
+                "left": np.random.uniform(0, 2 * np.pi, size=(3, len(_SWAY_FREQS_HZ))),
+                "right": np.random.uniform(0, 2 * np.pi, size=(3, len(_SWAY_FREQS_HZ))),
+            }
 
         left_xyz, left_quat, left_gripper = self._query_motion(self.left_motion, self.step_count)
         right_xyz, right_quat, right_gripper = self._query_motion(
             self.right_motion, self.step_count
         )
+
+        # Continuous idle sway -- always applied (not gated by inject_noise), so even
+        # commanded "holds" are never a literal frozen pose. inject_noise below is a
+        # separate, i.i.d.-per-step execution-noise knob (robustness training), not this.
+        left_xyz = left_xyz + self._idle_sway("left", self.step_count)
+        right_xyz = right_xyz + self._idle_sway("right", self.step_count)
 
         # Inject noise
         if self.inject_noise:
@@ -121,6 +154,8 @@ class BasePolicy:
 
 
 class PickAndTransferPolicy(BasePolicy):
+    IDLE_SWAY_AMPLITUDE = 0.003  # 3mm; see BasePolicy.IDLE_SWAY_AMPLITUDE
+
     def generate_trajectory(self, ts_first):
         init_mocap_pose_right = ts_first.observation["mocap_pose_right"]
         init_mocap_pose_left = ts_first.observation["mocap_pose_left"]
@@ -150,6 +185,11 @@ class PickAndTransferPolicy(BasePolicy):
             ]
         )
 
+        # Timing below targets a 600-step / 12s episode (SIM_TASK_CONFIGS episode_len) with
+        # human-paced segment durations: the original fixed-robot schedule packed the
+        # lift-and-carry into 0.6s (~0.4 m/s avg, faster once a via-point detour is added)
+        # while holding dead-still for 1.8-3.2s elsewhere. Durations here are rebalanced by
+        # distance/intent, not scaled uniformly; _apply_timing_jitter perturbs around this.
         self.left_trajectory = [
             {
                 "t": 0,
@@ -157,37 +197,37 @@ class PickAndTransferPolicy(BasePolicy):
                 "quat": init_mocap_pose_left[3:],
                 "gripper": 0,
                 "kind": "bottleneck",
-            },  # sleep
+            },  # sleep (idle sway covers "never fully still")
             {
-                "t": 100,
+                "t": 230,
                 "xyz": meet_xyz + np.array([-0.1, 0, -0.02]),
                 "quat": meet_left_quat.elements,
                 "gripper": 1,
                 "kind": "bottleneck",
-            },  # approach meet position
+            },  # approach meet position (coarse)
             {
-                "t": 260,
+                "t": 265,
                 "xyz": meet_xyz + np.array([0.02, 0, -0.02]),
                 "quat": meet_left_quat.elements,
                 "gripper": 1,
                 "kind": "bottleneck",
-            },  # move to meet position
+            },  # move to meet position (fine)
             {
-                "t": 310,
+                "t": 450,
                 "xyz": meet_xyz + np.array([0.02, 0, -0.02]),
                 "quat": meet_left_quat.elements,
                 "gripper": 0,
                 "kind": "bottleneck",
-            },  # close gripper
+            },  # close gripper -- handover anchor, synced with right's release
             {
-                "t": 360,
+                "t": 530,
                 "xyz": meet_xyz + np.array([-0.1, 0, -0.02]),
                 "quat": np.array([1, 0, 0, 0]),
                 "gripper": 0,
                 "kind": "bottleneck",
-            },  # move left
+            },  # move left (retreat)
             {
-                "t": 400,
+                "t": 600,
                 "xyz": meet_xyz + np.array([-0.1, 0, -0.02]),
                 "quat": np.array([1, 0, 0, 0]),
                 "gripper": 0,
@@ -204,56 +244,56 @@ class PickAndTransferPolicy(BasePolicy):
                 "kind": "bottleneck",
             },  # sleep
             {
-                "t": 90,
+                "t": 100,
                 "xyz": box_xyz + np.array([0, 0, 0.08]),
                 "quat": gripper_pick_quat.elements,
                 "gripper": 1,
                 "kind": "bottleneck",
             },  # approach the cube
             {
-                "t": 130,
+                "t": 150,
                 "xyz": box_xyz + np.array([0, 0, -0.015]),
                 "quat": gripper_pick_quat.elements,
                 "gripper": 1,
                 "kind": "bottleneck",
             },  # go down
             {
-                "t": 170,
+                "t": 180,
                 "xyz": box_xyz + np.array([0, 0, -0.015]),
                 "quat": gripper_pick_quat.elements,
                 "gripper": 0,
                 "kind": "bottleneck",
-            },  # close gripper
+            },  # close gripper (grasp)
             {
-                "t": 200,
+                "t": 320,
                 "xyz": meet_xyz + np.array([0.05, 0, 0]),
                 "quat": gripper_pick_quat.elements,
                 "gripper": 0,
                 "kind": "bottleneck",
-            },  # approach meet position
+            },  # approach meet position -- lift & carry gets a real time budget now
             {
-                "t": 220,
+                "t": 360,
                 "xyz": meet_xyz,
                 "quat": gripper_pick_quat.elements,
                 "gripper": 0,
                 "kind": "bottleneck",
-            },  # move to meet position
+            },  # move to meet position (fine)
             {
-                "t": 310,
+                "t": 450,
                 "xyz": meet_xyz,
                 "quat": gripper_pick_quat.elements,
                 "gripper": 1,
                 "kind": "bottleneck",
-            },  # open gripper
+            },  # open gripper -- handover anchor, synced with left's receive
             {
-                "t": 360,
+                "t": 530,
                 "xyz": meet_xyz + np.array([0.1, 0, 0]),
                 "quat": gripper_pick_quat.elements,
                 "gripper": 1,
                 "kind": "bottleneck",
-            },  # move to right
+            },  # move to right (retreat)
             {
-                "t": 400,
+                "t": 600,
                 "xyz": meet_xyz + np.array([0.1, 0, 0]),
                 "quat": gripper_pick_quat.elements,
                 "gripper": 1,
@@ -274,7 +314,7 @@ class PickAndTransferPolicy(BasePolicy):
         self._insert_via_point(self.left_trajectory, 1, 2, offset)  # approach meet -> move to meet
         self._insert_via_point(self.left_trajectory, 0, 1, offset)  # sleep -> approach meet
 
-        # per-episode timing jitter, synchronized at the shared handover instant (t=310)
+        # per-episode timing jitter, synchronized at the shared handover instant (t=450)
         jitter_r = np.random.uniform(0.85, 1.15)
         self._apply_timing_jitter(self.left_trajectory, jitter_r)
         self._apply_timing_jitter(self.right_trajectory, jitter_r)
@@ -289,7 +329,7 @@ class PickAndTransferPolicy(BasePolicy):
         trajectory.insert(idx_a + 1, via)
 
     @staticmethod
-    def _apply_timing_jitter(trajectory, r, anchor=310.0, total=400.0):
+    def _apply_timing_jitter(trajectory, r, anchor=450.0, total=600.0):
         for wp in trajectory:
             t = wp["t"]
             if t <= anchor:
