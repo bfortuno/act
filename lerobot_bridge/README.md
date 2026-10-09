@@ -45,8 +45,8 @@ Runs the scripted policy in `ee_sim_env` and streams each step into the dataset:
 same stored quantities as `record_sim_episodes.py --task_space` + the converter
 (task-space only), same sidecar with `source_dir: null` plus per-episode `success`.
 Norm stats for these datasets are computed from the dataset's own parquet columns.
-The rollout uses this project's mujoco (see the sim-fidelity caveat below), so the
-episodes are not the ones the in-repo HDF5 recorder would produce.
+The rollout uses this project's mujoco through `_sim_compat` (see the sim-fidelity
+caveat below).
 
 ### 2. Train (LeRobot ACT or Diffusion)
 
@@ -87,10 +87,15 @@ Mirrors `imitate_episodes.py:eval_bc_task_space` (denorm -> `invert_action_chunk
 in-repo baselines in `outputs/`.
 
 **Sim-fidelity caveat:** the bridge uses a current mujoco/dm-control (`mujoco 3.3`,
-no cp312 wheel exists for the root repo's `mujoco 2.3.7`). Contact dynamics may
-differ slightly from the in-repo numbers. If a comparison looks off, evaluate the
-same checkpoint through a two-process bridge (bridge serves policy actions; the
-root py3.8 env runs `ee_sim_env` with mujoco 2.3.7) - not yet implemented.
+no cp312 wheel exists for the root repo's `mujoco 2.3.7`). With the unmodified model,
+mujoco 3.3 tracks the mocap weld's commanded *rotation* far too loosely and the
+scripted policy never picks the cube. `_sim_compat.make_ee_sim_env` sets the weld
+`torquescale` to 20, which reproduces the 2.3.7 scripted rollouts to < 0.1 mm /
+0.01 deg over full episodes; `record_dataset.py` and `eval_sim.py` both use it -
+always build the env through it. This was checked on scripted transfer-cube rollouts
+only; if a comparison still looks off, evaluate the same checkpoint through a
+two-process bridge (bridge serves policy actions; the root py3.8 env runs
+`ee_sim_env` with mujoco 2.3.7) - not yet implemented.
 
 ## Development loop status
 

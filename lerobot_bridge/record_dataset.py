@@ -31,9 +31,9 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 import _shared  # noqa: F401  (repo root on sys.path)
 import ee_transforms
+from _sim_compat import make_ee_sim_env
 from constants import CAMERA_HEIGHT, CAMERA_WIDTH, DT, SIM_TASK_CONFIGS
 from convert_dataset import build_features
-from ee_sim_env import make_ee_sim_env
 from scripted_policy import InsertionPolicy, PickAndTransferPolicy
 
 POLICY_CLS = {

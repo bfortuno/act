@@ -42,7 +42,7 @@ ignore = ["E501", "B905"]
 # path is set before they import. `_eval_utils` sorts before `_shared` but bootstraps
 # `_shared` itself.
 known-first-party = [
-    "_shared", "_eval_utils", "ee_repr_dataset",
+    "_shared", "_eval_utils", "_sim_compat", "ee_repr_dataset",
     "constants", "convert_dataset", "ee_transforms", "ee_sim_env", "scripted_policy", "sim_env",
     "utils",
 ]

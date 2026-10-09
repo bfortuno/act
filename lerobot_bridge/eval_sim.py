@@ -27,8 +27,8 @@ import torch
 import _shared  # noqa: F401
 import ee_transforms
 from _eval_utils import aggregate_abs_poses, exp_weights
+from _sim_compat import make_ee_sim_env
 from constants import SIM_TASK_CONFIGS
-from ee_sim_env import make_ee_sim_env
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
