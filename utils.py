@@ -320,7 +320,10 @@ def sample_box_pose():
     ranges = np.vstack([x_range, y_range, z_range])
     cube_position = np.random.uniform(ranges[:, 0], ranges[:, 1])
 
-    cube_quat = np.array([1, 0, 0, 0])
+    # red_box is a symmetric 0.02x0.02x0.02 cube, so +-pi/4 covers its full unique
+    # rotational symmetry class about world z without aliasing.
+    yaw = np.random.uniform(-np.pi / 4, np.pi / 4)
+    cube_quat = np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])  # wxyz, rotation about z
     return np.concatenate([cube_position, cube_quat])
 
 
