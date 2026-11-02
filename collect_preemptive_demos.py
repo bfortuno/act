@@ -20,6 +20,8 @@ import inspect
 import json
 import os
 import pickle
+import shutil
+import subprocess
 import sys
 
 import h5py
@@ -326,6 +328,39 @@ def save_marked_video(res, path, cams=("top",)):
             d[c] = img
         frames.append(d)
     save_videos(frames, DT, video_path=path)
+    to_h264(path)
+
+
+def to_h264(mp4_path):
+    """cv2 writes MPEG-4 Part 2 ('mp4v'), which VS Code's media preview and browsers
+    cannot decode. If ffmpeg is available, re-encode in place to H.264 (yuv420p,
+    faststart) so the .mp4 plays everywhere."""
+    if shutil.which("ffmpeg") is None:
+        return
+    tmp = mp4_path + ".h264.mp4"
+    cmd = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        mp4_path,
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        "23",
+        "-preset",
+        "veryfast",
+        "-movflags",
+        "+faststart",
+        tmp,
+    ]
+    if subprocess.run(cmd).returncode == 0:
+        os.replace(tmp, mp4_path)
+    else:
+        print(f"[collect] ffmpeg could not re-encode {mp4_path} to H.264; left as mp4v")
 
 
 # --------------------------------------------------------------------------------------
