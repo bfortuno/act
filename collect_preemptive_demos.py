@@ -16,6 +16,7 @@ See README_preemptive_dagger.md.
 
 import argparse
 import glob
+import inspect
 import json
 import os
 import pickle
@@ -26,7 +27,7 @@ import numpy as np
 import torch
 
 import ee_transforms
-from constants import CAMERA_HEIGHT, CAMERA_WIDTH, DT, SIM_TASK_CONFIGS
+from constants import DT, SIM_TASK_CONFIGS
 from ee_sim_env import make_ee_sim_env
 from fpm import FPMContext, TransferCubeFailureMonitor, make_fpm, window_labels
 from imitate_episodes import _aggregate_abs_poses, get_image, make_policy
@@ -324,6 +325,27 @@ def save_marked_video(res, path, cams=("top",)):
 # --------------------------------------------------------------------------------------
 
 
+def make_env(task_name, camera_height=None, camera_width=None):
+    """Build ee_sim_env exactly like imitate_episodes.py --eval does (no size args), so the
+    learner sees images at the resolution it was trained on. Some checkouts render a fixed
+    size and take no camera kwargs; others accept them. Explicit --camera_* flags are only
+    forwarded when given, and fail loudly if this env cannot honour them."""
+    if camera_height is None and camera_width is None:
+        return make_ee_sim_env(task_name)
+    params = inspect.signature(make_ee_sim_env).parameters
+    if "camera_height" not in params or "camera_width" not in params:
+        raise SystemExit(
+            "[collect] this checkout's make_ee_sim_env renders a fixed size and takes no "
+            "camera_height/camera_width; drop --camera_height/--camera_width"
+        )
+    kw = {}
+    if camera_height is not None:
+        kw["camera_height"] = camera_height
+    if camera_width is not None:
+        kw["camera_width"] = camera_width
+    return make_ee_sim_env(task_name, **kw)
+
+
 def check_output_dir(dataset_dir, observe_only):
     """Never mix learner-only observe rollouts with training data: --observe_only must
     write to a dir holding only observe rollouts, and collection must not append to one."""
@@ -351,8 +373,6 @@ def main(args):
     cfg = SIM_TASK_CONFIGS[task_name]
     T = cfg["episode_len"]
     camera_names = cfg["camera_names"]
-    h = args.camera_height or cfg.get("camera_height", CAMERA_HEIGHT)
-    w = args.camera_width or cfg.get("camera_width", CAMERA_WIDTH)
 
     learner = Learner(args.ckpt_dir, args.ckpt_name, args.n_inference_steps)
     fpm = make_fpm(args.fpm, json.loads(args.fpm_kwargs) if args.fpm_kwargs else None)
@@ -377,7 +397,7 @@ def main(args):
         "label_horizon": int(label_horizon),
     }
 
-    env = make_ee_sim_env(task_name, camera_height=h, camera_width=w)
+    env = make_env(task_name, args.camera_height, args.camera_width)
     summary, all_scores, all_success, all_tau = [], [], [], []
     n_saved = 0
     for r in range(args.num_rollouts):
@@ -496,6 +516,10 @@ if __name__ == "__main__":
         action="store_true",
         help="mp4 per saved episode; expert frames get a red border",
     )
-    p.add_argument("--camera_height", type=int, default=None)
-    p.add_argument("--camera_width", type=int, default=None)
+    p.add_argument(
+        "--camera_height", type=int, default=None, help="default: env default (= what --eval uses)"
+    )
+    p.add_argument(
+        "--camera_width", type=int, default=None, help="default: env default (= what --eval uses)"
+    )
     main(p.parse_args())
