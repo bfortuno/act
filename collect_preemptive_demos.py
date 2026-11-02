@@ -324,6 +324,25 @@ def save_marked_video(res, path, cams=("top",)):
 # --------------------------------------------------------------------------------------
 
 
+def check_output_dir(dataset_dir, observe_only):
+    """Never mix learner-only observe rollouts with training data: --observe_only must
+    write to a dir holding only observe rollouts, and collection must not append to one."""
+    for path in sorted(glob.glob(os.path.join(dataset_dir, "episode_*.hdf5"))):
+        with h5py.File(path, "r") as root:
+            is_observe = bool(root.attrs.get("observe_only", False))
+        if observe_only and not is_observe:
+            raise SystemExit(
+                f"[collect] {dataset_dir} already holds training episodes ({os.path.basename(path)}). "
+                "--observe_only saves learner-only rollouts (no expert labels); write them to a "
+                "separate dir, e.g. --dataset_dir runs/observe"
+            )
+        if not observe_only and is_observe:
+            raise SystemExit(
+                f"[collect] {dataset_dir} contains --observe_only rollouts "
+                f"({os.path.basename(path)}); collect into a copy of the base dataset instead"
+            )
+
+
 def main(args):
     set_seed(args.seed)
     task_name = args.task_name
@@ -340,6 +359,7 @@ def main(args):
     label_horizon = args.label_horizon or learner.num_queries
 
     os.makedirs(args.dataset_dir, exist_ok=True)
+    check_output_dir(args.dataset_dir, args.observe_only)
     if args.start_episode_idx is None:
         idx = len(glob.glob(os.path.join(args.dataset_dir, "episode_*.hdf5")))
     else:

@@ -17,10 +17,18 @@ def expert_steps_and_run_ends(root, T):
     of its contiguous expert segment (learner actions after a handback are not labels).
 
     Returns (valid_start_indices, run_end) where run_end[t] is the first non-expert index
-    >= t. Episodes without the mask (or with an empty one) are fully valid."""
-    mask = root["/is_expert"][()].astype(bool) if "is_expert" in root else None
-    if mask is None or not mask.any():
+    >= t. Episodes without the mask are fully valid. An episode WITH a mask but no expert
+    step is a learner-only rollout (e.g. --observe_only output): it has no expert labels,
+    so it is refused rather than silently imitated."""
+    if "is_expert" not in root:
         return np.arange(T), np.full(T, T)
+    mask = root["/is_expert"][()].astype(bool)
+    if not mask.any():
+        raise ValueError(
+            f"{root.filename}: /is_expert has no expert steps (learner-only rollout, e.g. "
+            "collect_preemptive_demos.py --observe_only). It must not be in a training "
+            "dataset; remove it."
+        )
     run_end = np.full(T, T)
     nxt = T
     for t in range(T - 1, -1, -1):
