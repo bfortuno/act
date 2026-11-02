@@ -77,6 +77,14 @@ while the fingers slide on the cube never fires; `tau_fail` is the first step of
 - `drop`: the cube was really lifted (more than 2 cm above its resting height) and is back at table height with no finger contact.
 - `missed_grasp`: the cube was never lifted; the right gripper opened earlier and is now commanded closed, its commanded (mocap) height is more than 6 cm above the cube, and the cube is on the table without right-finger contact.
 - `off_table`: the cube is more than 3 cm below its resting height.
+- `missed_handover`: the cube is lifted and held by the right arm only, and the left gripper (which opened earlier) has closed past the cube width (achieved opening < 0.45; closed on the cube it is ~0.60) with no left-finger contact.
+- `stalled_grasp`: the right fingers first touched the cube 75 steps ago, but it was never lifted and is still on the table (a fumbled grasp that would otherwise only end in a timeout). `tau_fail` is the first touch.
+
+FPM labels follow the env's success criterion: a rollout the env counts as successful is never labelled as failing, even if the monitor latched an event (the event stays in the attrs).
+
+The expert decides who holds the cube from contact *history* (touched within the last 15 steps) and the cube's height, not from one step's contacts. Even a firm grasp can show zero contacts for a step while the cube is in the air.
+
+Workspace: with the deterministic scripted grasp, cubes at x > ~0.26 cannot be grasped (even by the expert). Keep `sample_box_pose` at x ≤ 0.25, otherwise those rollouts are unrecoverable.
 
 Each saved episode has `/monitor_trace` (T, 4): touch_left_arm, touch_right_arm, touch_table and cube_z after every step, plus `/observations/env_state` (cube pose), so you can check any event against what the detector saw.
 

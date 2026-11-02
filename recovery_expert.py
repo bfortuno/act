@@ -42,7 +42,9 @@ REACH_SPEED = 0.004
 CARRY_SPEED = 0.008
 MIN_REACH = 20
 
-MIN_TIME_SCALE = 0.5  # refuse plans that would need >2x speed-up to fit the episode
+# refuse plans that would need more speed-up than this to fit the remaining episode:
+# pick includes a fast 25cm carry (keep <= 2x); carry/handover are short motions (2.5x)
+MIN_TIME_SCALE = {"pick": 0.5, "carry": 0.4, "handover": 0.4}
 END_MARGIN = 10  # steps of final hold guaranteed before episode end
 
 
@@ -60,15 +62,25 @@ def _reach(a, b, speed=REACH_SPEED, min_steps=MIN_REACH):
     return max(min_steps, int(np.ceil(np.linalg.norm(np.asarray(b) - np.asarray(a)) / speed)))
 
 
-def detect_phase(physics, last_action, z_rest):
+def detect_phase(physics, last_action, z_rest, monitor=None, t=None):
+    """Who holds the cube. Contacts flicker for single steps even in a firm grasp (the
+    cube can be airborne with zero registered contacts), so with a ``monitor`` the
+    decision uses contact *history* (touched within the last 15 steps) and the cube's
+    height (airborne = somebody holds it) instead of this step's contacts alone."""
     touch_l, touch_r, touch_table = contact_flags(physics)
     box = cube_pose(physics)
     if z_rest is not None and box[2] < z_rest - 0.03:
         return "off_table"
-    if touch_l and not touch_table:
+    if monitor is not None and t is not None:
+        touch_l = touch_l or monitor.touched_recently("left", t)
+        touch_r = touch_r or monitor.touched_recently("right", t)
+    airborne = z_rest is not None and box[2] > z_rest + 0.02
+    if touch_l and (airborne or not touch_table):
         return "handover"
     right_cmd_closed = last_action is not None and float(last_action[15]) < 0.5
-    if touch_r and (not touch_table or right_cmd_closed):
+    if touch_r and (airborne or not touch_table or right_cmd_closed):
+        return "carry"
+    if airborne:  # held, but by nobody we saw recently: the right arm carries by default
         return "carry"
     return "pick"
 
@@ -84,9 +96,12 @@ class TransferCubeRecoveryExpert:
 
     # ------------------------------------------------------------------ planning
     @classmethod
-    def plan(cls, physics, obs, last_action, t0, episode_len, z_rest=None):
-        """Build a recovery plan from the current state, or None if unrecoverable."""
-        phase = detect_phase(physics, last_action, z_rest)
+    def plan(cls, physics, obs, last_action, t0, episode_len, z_rest=None, monitor=None):
+        """Build a recovery plan from the current state, or None if unrecoverable.
+        Pass the episode's failure ``monitor`` for flicker-robust phase detection."""
+        if monitor is not None and z_rest is None:
+            z_rest = monitor.z_rest
+        phase = detect_phase(physics, last_action, z_rest, monitor=monitor, t=t0 - 1)
         if phase == "off_table":
             return None
 
@@ -112,7 +127,7 @@ class TransferCubeRecoveryExpert:
         scale = 1.0
         if end > budget:
             scale = budget / end
-            if scale < MIN_TIME_SCALE:
+            if scale < MIN_TIME_SCALE[phase]:
                 return None
             for wp in left + right:
                 wp["t"] *= scale

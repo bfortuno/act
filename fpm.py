@@ -139,6 +139,12 @@ class TransferCubeFailureMonitor:
                     cube sits on the table without right-finger contact: lifting an
                     empty hand
       off_table     cube z more than 3cm below its resting height (fell off the table)
+      missed_handover  the cube is lifted and held by the right arm only, and the left
+                    gripper (which opened earlier) has closed past the cube width with no
+                    left-finger contact: the left hand grabbed air at the handover
+      stalled_grasp the right fingers first touched the cube STALL_STEPS ago, but it was
+                    never lifted and still sits on the table: a fumbled grasp that would
+                    otherwise only end in a timeout. t_event = the first touch.
 
     ``update`` is called once per env step with the action that was just applied. The
     monitor is cheap to ``clone()``, which the lookahead oracle uses to continue the
@@ -151,6 +157,10 @@ class TransferCubeFailureMonitor:
     LIFT_HEIGHT = 0.02  # cube must rise this much above rest to count as lifted
     ON_TABLE_TOL = 0.005  # "back at table height"
     PERSIST = 10  # consecutive steps (0.2s) a condition must hold to fire
+    # achieved (normalized) gripper opening when closed on the 2cm cube is ~0.60; below
+    # this the fingers have closed past the cube width, i.e. on nothing
+    CLOSED_ON_AIR = 0.45
+    STALL_STEPS = 75  # 1.5s of touching without lifting (a clean grasp lifts in ~30)
 
     def __init__(self, record=False):
         self.record = record
@@ -161,19 +171,29 @@ class TransferCubeFailureMonitor:
         # touches only the table -- NOT at reset: the cube spawns at z=0.05 and falls.
         self.r_max = 0
         self.right_opened = False
+        self.left_opened = False
         self.lifted = False
+        self.first_right_touch = None
+        self.last_touch = {"left": None, "right": None}  # last env step each arm touched
         self.z_rest = None
         self.event = None
         self.t_event = None
-        self.streak = {"drop": 0, "missed_grasp": 0, "off_table": 0}
+        self.streak = {"drop": 0, "missed_grasp": 0, "off_table": 0, "missed_handover": 0}
         self.trace = []
 
     def clone(self):
         m = TransferCubeFailureMonitor.__new__(TransferCubeFailureMonitor)
         m.__dict__.update(self.__dict__)
         m.streak = dict(self.streak)
+        m.last_touch = dict(self.last_touch)
         m.record, m.trace = False, []  # simulated futures never write the real trace
         return m
+
+    def touched_recently(self, arm, t, window=15):
+        """Contact is intermittent even in a firm grasp; 'holding' = touched within the
+        last ``window`` steps."""
+        last = self.last_touch[arm]
+        return last is not None and t - last <= window
 
     def update(self, physics, action, t):
         """Returns the event name once a failure is confirmed, else None."""
@@ -181,6 +201,10 @@ class TransferCubeFailureMonitor:
         box = cube_pose(physics)
         if self.record:
             self.trace.append((touch_l, touch_r, touch_table, float(box[2])))
+        if touch_l:
+            self.last_touch["left"] = t
+        if touch_r:
+            self.last_touch["right"] = t
         if self.event is not None:
             return self.event
 
@@ -191,10 +215,15 @@ class TransferCubeFailureMonitor:
             return None
         if box[2] > self.z_rest + self.LIFT_HEIGHT:
             self.lifted = True
-        if _ee_pose(physics)[15] > 0.5:  # achieved right gripper opening
+        ee = _ee_pose(physics)  # achieved poses; [7] / [15] = left / right gripper opening
+        if ee[15] > 0.5:
             self.right_opened = True
+        if ee[7] > 0.5:
+            self.left_opened = True
 
         on_table = box[2] < self.z_rest + self.ON_TABLE_TOL
+        if touch_r and on_table and not self.lifted and self.first_right_touch is None:
+            self.first_right_touch = t
         cond = {
             "off_table": box[2] < self.z_rest - self.OFF_TABLE_DROP,
             "drop": self.lifted and on_table and not touch_l and not touch_r,
@@ -210,12 +239,28 @@ class TransferCubeFailureMonitor:
                 and on_table
                 and not touch_r
             ),
+            "missed_handover": (
+                self.lifted
+                and not on_table
+                and touch_r
+                and not touch_l
+                and self.left_opened
+                and ee[7] < self.CLOSED_ON_AIR
+            ),
         }
-        for name in ("off_table", "drop", "missed_grasp"):
+        for name in ("off_table", "drop", "missed_grasp", "missed_handover"):
             self.streak[name] = self.streak[name] + 1 if cond[name] else 0
             if self.streak[name] >= self.PERSIST:
                 self.event, self.t_event = name, t - self.PERSIST + 1
                 return name
+        if (
+            self.first_right_touch is not None
+            and not self.lifted
+            and on_table
+            and t - self.first_right_touch >= self.STALL_STEPS
+        ):
+            self.event, self.t_event = "stalled_grasp", self.first_right_touch
+            return self.event
         return None
 
 

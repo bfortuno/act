@@ -218,7 +218,7 @@ def rollout(env, learner, fpm, args, T, task_name):
                     and monitor.event is None  # pre-emptive only: not after the failure
                 ):
                     expert = TransferCubeRecoveryExpert.plan(
-                        env.physics, ts.observation, last_action, t, T, z_rest=monitor.z_rest
+                        env.physics, ts.observation, last_action, t, T, monitor=monitor
                     )
                     if expert is None:
                         unrecoverable = True
@@ -287,7 +287,10 @@ def save_episode(res, dataset_dir, idx, camera_names, T, meta, label_horizon):
     path = os.path.join(dataset_dir, f"episode_{idx}.hdf5")
     tau = res["tau_fail"]
     # a failed rollout without an identified event is labelled as failing at the timeout
-    tau_label = T - 1 if tau is None and not res["success"] else tau
+    # labels follow the env's success criterion: a rollout the env counts as successful
+    # is never labelled as failing (the monitor event, if any, stays in the attrs)
+    timeout_tau = T - 1 if tau is None else tau  # failure without an event: the timeout
+    tau_label = None if res["success"] else timeout_tau
     with h5py.File(path, "a") as root:
         root.create_dataset("is_expert", data=res["is_expert"])
         root.create_dataset("fpm_score", data=res["fpm_score"])
