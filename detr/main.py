@@ -33,7 +33,7 @@ def get_args_parser():
     # * Backbone
     parser.add_argument(
         "--backbone",
-        default="resnet18",
+        default="resnet50",
         type=str,  # will be overridden
         help="Name of the convolutional backbone to use",
     )
