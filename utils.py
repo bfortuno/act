@@ -11,6 +11,25 @@ import ee_transforms
 e = IPython.embed
 
 
+def expert_steps_and_run_ends(root, T):
+    """Pre-emptive DAgger episodes (collect_preemptive_demos.py) carry /is_expert: only
+    expert steps are valid training samples, and an action chunk must not run past the end
+    of its contiguous expert segment (learner actions after a handback are not labels).
+
+    Returns (valid_start_indices, run_end) where run_end[t] is the first non-expert index
+    >= t. Episodes without the mask (or with an empty one) are fully valid."""
+    mask = root["/is_expert"][()].astype(bool) if "is_expert" in root else None
+    if mask is None or not mask.any():
+        return np.arange(T), np.full(T, T)
+    run_end = np.full(T, T)
+    nxt = T
+    for t in range(T - 1, -1, -1):
+        if not mask[t]:
+            nxt = t
+        run_end[t] = nxt
+    return np.flatnonzero(mask), run_end
+
+
 class EpisodicDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -47,7 +66,8 @@ class EpisodicDataset(torch.utils.data.Dataset):
             is_sim = root.attrs["sim"]
             original_action_shape = root["/action"].shape
             episode_len = original_action_shape[0]
-            start_ts = 0 if sample_full_episode else np.random.choice(episode_len)
+            valid_ts, run_end = expert_steps_and_run_ends(root, episode_len)
+            start_ts = 0 if sample_full_episode else int(np.random.choice(valid_ts))
             # get observation at start_ts only
             qpos = root["/observations/qpos"][start_ts]
             image_dict = dict()
@@ -56,7 +76,8 @@ class EpisodicDataset(torch.utils.data.Dataset):
             # get all actions after and including start_ts
             if is_sim:
                 action = root["/action"][start_ts:]
-                action_len = episode_len - start_ts
+                # == episode_len - start_ts unless the expert segment ends earlier
+                action_len = int(run_end[start_ts]) - start_ts
             else:
                 action = root["/action"][
                     max(0, start_ts - 1) :
@@ -142,16 +163,17 @@ def _get_task_space_norm_stats(dataset_dir, num_episodes, action_repr, rot_repr,
         with h5py.File(dataset_path, "r") as root:
             qpos = root["/observations/qpos"][()]  # (T, 16) canonical
             action = root["/action"][()]  # (T, 16) canonical
+            valid_ts, run_end = expert_steps_and_run_ends(root, qpos.shape[0])
         canon_qpos = qpos
         T = qpos.shape[0]
-        all_state.append(ee_transforms.transform_state(qpos, rot_repr))
+        all_state.append(ee_transforms.transform_state(qpos[valid_ts], rot_repr))
 
         # cap total windows so stat computation stays fast; every horizon index still
         # ends up with tens of thousands of samples.
         stride = max(1, (num_episodes * T) // 4000)
-        for start_ts in range(0, T, stride):
+        for start_ts in valid_ts[::stride]:
             ref = qpos[start_ts]
-            window = action[start_ts : start_ts + chunk_size]
+            window = action[start_ts : min(start_ts + chunk_size, run_end[start_ts])]
             feat = ee_transforms.transform_action_chunk(window, ref, action_repr, rot_repr)
             if action_repr == "absolute":
                 flat_action.append(feat)
