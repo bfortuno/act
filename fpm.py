@@ -345,6 +345,7 @@ class LookaheadOracleFPM(FailurePredictor):
         if env is None or physics is None:
             raise ValueError("LookaheadOracleFPM needs privileged ctx.env / ctx.physics")
         actions = np.asarray(ctx.pending_abs)
+        n_real = len(actions)  # steps the learner actually planned; the rest is padding
         H = self.horizon or max(len(actions), self.min_horizon)
         if len(actions) < H and self.hold_last:
             actions = np.concatenate([actions, np.repeat(actions[-1:], H - len(actions), 0)])
@@ -354,12 +355,19 @@ class LookaheadOracleFPM(FailurePredictor):
         snap = snapshot_physics(physics)
         task, n_sub = env.task, env._n_sub_steps
         k_fail = None
+        self.last_prediction = None  # diagnostics: which event, when, from padding or not
         try:
             for k, a in enumerate(actions):
                 task.before_step(a, physics)
                 physics.step(n_sub)
                 if monitor.update(physics, a, ctx.t + k) is not None:
                     k_fail = max(0, monitor.t_event - ctx.t)  # steps until the failure starts
+                    self.last_prediction = {
+                        "event": monitor.event,
+                        "t_event": int(monitor.t_event),
+                        "confirmed_at": int(ctx.t + k),
+                        "in_padding": bool(k >= n_real),
+                    }
                     break
         finally:
             restore_physics(physics, snap)

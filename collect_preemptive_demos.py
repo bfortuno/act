@@ -178,6 +178,7 @@ def rollout(env, learner, fpm, args, T, task_name):
     query_mask = np.zeros(T, dtype=bool)
     prop_rel, prop_abs = None, np.full((T, H, ee_transforms.CANONICAL_DIM), np.nan, np.float32)
     interventions = []
+    predictions = []  # every check where the FPM predicted a failure (p > 0)
     expert, expert_steps, last_action = None, 0, None
     unrecoverable = False
     r_max = 0
@@ -211,6 +212,9 @@ def rollout(env, learner, fpm, args, T, task_name):
                     ctx.physics, ctx.env, ctx.monitor = env.physics, env, monitor
                 p = float(fpm(ctx))
                 fpm_score[t] = p
+                pred = getattr(fpm, "last_prediction", None) if p > 0 else None
+                if pred is not None:
+                    predictions.append({"t": t, "p": round(p, 4), **pred})
                 if (
                     not args.observe_only
                     and p > args.fpm_threshold
@@ -224,7 +228,7 @@ def rollout(env, learner, fpm, args, T, task_name):
                         unrecoverable = True
                         interventions.append({"t0": t, "p": p, "phase": "unrecoverable"})
                         break
-                    interventions.append({**expert.describe(), "p": p})
+                    interventions.append({**expert.describe(), "p": p, "predicted": pred})
                     expert_steps = 0
         if expert is not None:
             action = expert()
@@ -259,6 +263,7 @@ def rollout(env, learner, fpm, args, T, task_name):
         "prop_rel": prop_rel,
         "prop_abs": prop_abs,
         "interventions": interventions,
+        "predictions": predictions,
         "unrecoverable": unrecoverable,
         "success": bool(success),
         "r_max": int(r_max),
@@ -459,6 +464,7 @@ def main(args):
             "success": res["success"],
             "r_max": res["r_max"],
             "interventions": res["interventions"],
+            "predictions": res["predictions"],
             "unrecoverable": res["unrecoverable"],
             "fail_event": res["fail_event"],
             "tau_fail": res["tau_fail"],
@@ -475,6 +481,7 @@ def main(args):
             f"[rollout {r}] success={res['success']} r_max={res['r_max']} "
             f"event={res['fail_event']}@{res['tau_fail']} max_p={row['max_fpm']} "
             f"interventions={res['interventions']} saved_as={saved_as}"
+            + (f"\n    first prediction: {res['predictions'][0]}" if res["predictions"] else "")
         )
 
     tag = "observe" if args.observe_only else "collect"
