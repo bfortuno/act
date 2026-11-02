@@ -166,7 +166,7 @@ def rollout(env, learner, fpm, args, T, task_name):
     ex = Executor(learner, T, args.temporal_agg, args.query_every)
     ts = env.reset()
     fpm.reset(env)
-    monitor = TransferCubeFailureMonitor()
+    monitor = TransferCubeFailureMonitor(record=True)
     monitor.reset(env.physics)
 
     H, D = learner.num_queries, None
@@ -262,6 +262,7 @@ def rollout(env, learner, fpm, args, T, task_name):
         "r_max": int(r_max),
         "tau_fail": tau,
         "fail_event": monitor.event,
+        "monitor_trace": np.array(monitor.trace, dtype=np.float32),
         "complete": len(actions) == T,
     }
 
@@ -290,6 +291,13 @@ def save_episode(res, dataset_dir, idx, camera_names, T, meta, label_horizon):
         root.create_dataset("fpm_score", data=res["fpm_score"])
         root.create_dataset("fpm_label", data=window_labels(T, tau_label, label_horizon))
         root.create_dataset("query_mask", data=res["query_mask"])
+        # debugging / replay: what the failure monitor saw after each step
+        # columns: touch_left_arm, touch_right_arm, touch_table, cube_z
+        root.create_dataset("monitor_trace", data=res["monitor_trace"][:T])
+        root.create_dataset(
+            "observations/env_state",
+            data=np.stack([res["episode"][t].observation["env_state"] for t in range(T)]),
+        )
         if res["prop_rel"] is not None:
             root.create_dataset("proposed_rel_chunk", data=res["prop_rel"], compression="gzip")
         root.create_dataset("proposed_abs_chunk", data=res["prop_abs"], compression="gzip")

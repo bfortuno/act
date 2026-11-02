@@ -127,22 +127,33 @@ def reward_from_flags(touch_l, touch_r, touch_table):
 class TransferCubeFailureMonitor:
     """Stateful detector of *irreversible* failures in sim_transfer_cube.
 
-    Events (first one wins, latched):
-      drop          cube back on the table, touched by no finger, after it was lifted
-      missed_grasp  right gripper opened earlier, is now commanded closed, its EE is >6cm
-                    above the cube, cube still on the table with no right-finger contact,
-                    and the cube was never lifted -> the arm is lifting an empty hand
-      off_table     cube z dropped >3cm below its resting height (fell off the table)
+    All events are geometric and must persist for ``PERSIST`` consecutive steps, so a
+    one-step contact flicker (common while fingers slide on the cube during a grasp)
+    never fires. ``t_event`` is the FIRST step of the persistent streak.
+
+    Events (first one confirmed wins, latched):
+      drop          the cube was really lifted (z > rest + LIFT_HEIGHT) and is back at
+                    table height with no finger contact
+      missed_grasp  never lifted; the right gripper opened earlier, is now commanded
+                    closed, its commanded (mocap) height is >6cm above the cube, and the
+                    cube sits on the table without right-finger contact: lifting an
+                    empty hand
+      off_table     cube z more than 3cm below its resting height (fell off the table)
 
     ``update`` is called once per env step with the action that was just applied. The
     monitor is cheap to ``clone()``, which the lookahead oracle uses to continue the
-    current history inside a simulated future.
+    current history inside a simulated future. With ``record=True`` it keeps a per-step
+    trace (touch_left, touch_right, touch_table, cube_z) for debugging saved episodes.
     """
 
     MISSED_GRASP_HEIGHT = 0.06
     OFF_TABLE_DROP = 0.03
+    LIFT_HEIGHT = 0.02  # cube must rise this much above rest to count as lifted
+    ON_TABLE_TOL = 0.005  # "back at table height"
+    PERSIST = 10  # consecutive steps (0.2s) a condition must hold to fire
 
-    def __init__(self):
+    def __init__(self, record=False):
+        self.record = record
         self.reset()
 
     def reset(self, physics=None):
@@ -150,50 +161,62 @@ class TransferCubeFailureMonitor:
         # touches only the table -- NOT at reset: the cube spawns at z=0.05 and falls.
         self.r_max = 0
         self.right_opened = False
+        self.lifted = False
         self.z_rest = None
         self.event = None
         self.t_event = None
+        self.streak = {"drop": 0, "missed_grasp": 0, "off_table": 0}
+        self.trace = []
 
     def clone(self):
         m = TransferCubeFailureMonitor.__new__(TransferCubeFailureMonitor)
         m.__dict__.update(self.__dict__)
+        m.streak = dict(self.streak)
+        m.record, m.trace = False, []  # simulated futures never write the real trace
         return m
 
     def update(self, physics, action, t):
-        """Returns the event name if a failure is detected at this step, else None."""
+        """Returns the event name once a failure is confirmed, else None."""
+        touch_l, touch_r, touch_table = contact_flags(physics)
+        box = cube_pose(physics)
+        if self.record:
+            self.trace.append((touch_l, touch_r, touch_table, float(box[2])))
         if self.event is not None:
             return self.event
-        touch_l, touch_r, touch_table = contact_flags(physics)
+
         self.r_max = max(self.r_max, reward_from_flags(touch_l, touch_r, touch_table))
-        box = cube_pose(physics)
         if self.z_rest is None and touch_table and not touch_l and not touch_r:
             self.z_rest = float(box[2])
-
-        # achieved right gripper opening (normalized 0 closed .. 1 open) + EE poses
-        ee = _ee_pose(physics)
-        if ee[15] > 0.5:
+        if self.z_rest is None:
+            return None
+        if box[2] > self.z_rest + self.LIFT_HEIGHT:
+            self.lifted = True
+        if _ee_pose(physics)[15] > 0.5:  # achieved right gripper opening
             self.right_opened = True
 
-        event = None
-        if self.z_rest is not None and box[2] < self.z_rest - self.OFF_TABLE_DROP:
-            event = "off_table"
-        elif self.r_max >= 2 and touch_table and not touch_l and not touch_r:
-            event = "drop"
-        elif (
-            self.r_max < 2
-            and self.right_opened
-            and action is not None
-            and float(action[15]) < 0.3
-            # commanded (mocap) height, the frame actions live in: a correct grasp is at
-            # cube_z - 0.015, hover at +0.08 (gripper_link ee_pose sits ~0.13m higher)
-            and float(physics.data.mocap_pos[1][2]) > box[2] + self.MISSED_GRASP_HEIGHT
-            and touch_table
-            and not touch_r
-        ):
-            event = "missed_grasp"
-        if event is not None:
-            self.event, self.t_event = event, t
-        return event
+        on_table = box[2] < self.z_rest + self.ON_TABLE_TOL
+        cond = {
+            "off_table": box[2] < self.z_rest - self.OFF_TABLE_DROP,
+            "drop": self.lifted and on_table and not touch_l and not touch_r,
+            "missed_grasp": (
+                not self.lifted
+                and self.right_opened
+                and action is not None
+                and float(action[15]) < 0.3
+                # commanded (mocap) height, the frame actions live in: a correct grasp is
+                # at cube_z - 0.015, hover at +0.08 (gripper_link ee_pose sits ~0.13m
+                # higher)
+                and float(physics.data.mocap_pos[1][2]) > box[2] + self.MISSED_GRASP_HEIGHT
+                and on_table
+                and not touch_r
+            ),
+        }
+        for name in ("off_table", "drop", "missed_grasp"):
+            self.streak[name] = self.streak[name] + 1 if cond[name] else 0
+            if self.streak[name] >= self.PERSIST:
+                self.event, self.t_event = name, t - self.PERSIST + 1
+                return name
+        return None
 
 
 def _ee_pose(physics):
@@ -251,8 +274,11 @@ class LookaheadOracleFPM(FailurePredictor):
     name = "lookahead_oracle"
     privileged = True
 
-    def __init__(self, horizon=None, gamma=0.98, hold_last=True):
+    def __init__(self, horizon=None, gamma=0.98, hold_last=True, min_horizon=40):
         self.horizon = horizon
+        # events need TransferCubeFailureMonitor.PERSIST steps to confirm; near the end of
+        # a chunk the pending part is short, so pad (holding the last pose) to this length
+        self.min_horizon = min_horizon
         self.gamma = gamma
         self.hold_last = hold_last  # keep commanding the last pose if chunk < horizon
 
@@ -261,7 +287,7 @@ class LookaheadOracleFPM(FailurePredictor):
         if env is None or physics is None:
             raise ValueError("LookaheadOracleFPM needs privileged ctx.env / ctx.physics")
         actions = np.asarray(ctx.pending_abs)
-        H = self.horizon or len(actions)
+        H = self.horizon or max(len(actions), self.min_horizon)
         if len(actions) < H and self.hold_last:
             actions = np.concatenate([actions, np.repeat(actions[-1:], H - len(actions), 0)])
         actions = actions[:H]
@@ -275,7 +301,7 @@ class LookaheadOracleFPM(FailurePredictor):
                 task.before_step(a, physics)
                 physics.step(n_sub)
                 if monitor.update(physics, a, ctx.t + k) is not None:
-                    k_fail = k
+                    k_fail = max(0, monitor.t_event - ctx.t)  # steps until the failure starts
                     break
         finally:
             restore_physics(physics, snap)

@@ -70,11 +70,15 @@ uv run python imitate_episodes.py --task_space --action_repr relative --rot_repr
 | `acc` | `ChunkConsistencyFPM`: disagreement between overlapping receding-horizon chunks, compared in absolute space. | Training-free and black-box. Needs overlapping chunks: `--temporal_agg` or `--query_every < chunk_size`. |
 | `pkg.mod:factory` | Your learned FPM, e.g. a dual-stream DINOv2/SigLIP + TCN guardian. | `factory(**json.loads(--fpm_kwargs))` must return a callable `(FPMContext) -> float`. Optionally it can define `reset(env)` and `privileged = False`. |
 
-Ground-truth failure events (`TransferCubeFailureMonitor`, latched, first wins):
+Ground-truth failure events (`TransferCubeFailureMonitor`, latched, first wins). All are
+geometric and must hold for 10 consecutive steps (0.2 s), so a one-step contact flicker
+while the fingers slide on the cube never fires; `tau_fail` is the first step of that streak:
 
-- `drop`: the cube is on the table, touched by no finger, after it was lifted.
-- `missed_grasp`: the right gripper opened earlier and is now commanded closed, its EE is more than 6 cm above the cube, and the cube is still on the table without right-finger contact.
+- `drop`: the cube was really lifted (more than 2 cm above its resting height) and is back at table height with no finger contact.
+- `missed_grasp`: the cube was never lifted; the right gripper opened earlier and is now commanded closed, its commanded (mocap) height is more than 6 cm above the cube, and the cube is on the table without right-finger contact.
 - `off_table`: the cube is more than 3 cm below its resting height.
+
+Each saved episode has `/monitor_trace` (T, 4): touch_left_arm, touch_right_arm, touch_table and cube_z after every step, plus `/observations/env_state` (cube pose), so you can check any event against what the detector saw.
 
 Interventions are pre-emptive only: once an event has fired, the gate no longer triggers.
 
