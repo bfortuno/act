@@ -86,17 +86,23 @@ slide on the cube never fires; `tau_fail` is the first step of that streak:
   ~0.60) with no left-finger contact.
 - `stalled_grasp`: the right fingers first touched the cube 75 steps ago, but it was never lifted
   and is still on the table (a fumbled grasp that would otherwise only end in a timeout). `tau_fail`
-  is the first touch.
+  is the first touch; the timer resets once the right fingers have been off the cube for 20 steps.
+- `no_progress`: the cube is still not lifted at the point of no return, `episode_len - 170`
+  (step 230 for 400-step episodes). After that even a full re-grasp by the expert cannot finish in
+  time. Catches a learner that hovers without ever touching the cube.
 
 FPM labels follow the env's success criterion: a rollout the env counts as successful is never
 labelled as failing, even if the monitor latched an event (the event stays in the attrs).
 
-The expert decides who holds the cube from contact _history_ (touched within the last 15 steps) and
-the cube's height, not from one step's contacts. Even a firm grasp can show zero contacts for a step
-while the cube is in the air.
+The expert decides the phase from the cube's height and contact _history_ (touched within the last
+15 steps), not from one step's contacts. Even a firm grasp can show zero contacts for a step while
+the cube is in the air. A cube on the table always means `pick` (re-grasp), including a stalled
+grasp with the right fingers touching it; an airborne cube touched recently by the left means
+`handover`; otherwise `carry`.
 
 Workspace: with the deterministic scripted grasp, cubes at x > ~0.26 cannot be grasped (even by the
-expert). Keep `sample_box_pose` at x ≤ 0.25, otherwise those rollouts are unrecoverable.
+expert). A `pick` with the cube beyond x = 0.258 is reported unrecoverable instead of attempted.
+Keep `sample_box_pose` at x ≤ 0.25, otherwise those rollouts are wasted.
 
 Each saved episode has `/monitor_trace` (T, 4): touch_left_arm, touch_right_arm, touch_table and
 cube_z after every step, plus `/observations/env_state` (cube pose), so you can check any event
