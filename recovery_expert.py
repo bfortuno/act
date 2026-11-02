@@ -44,6 +44,10 @@ MIN_REACH = 20
 
 # refuse plans that would need more speed-up than this to fit the remaining episode:
 # pick includes a fast 25cm carry (keep <= 2x); carry/handover are short motions (2.5x)
+# the deterministic scripted grasp cannot reach cubes beyond this x (measured: x<=0.256
+# always succeeds, x>=0.26 always fails); such states are reported unrecoverable
+WORKSPACE_X_MAX = 0.258
+
 MIN_TIME_SCALE = {"pick": 0.5, "carry": 0.4, "handover": 0.4}
 END_MARGIN = 10  # steps of final hold guaranteed before episode end
 
@@ -75,14 +79,13 @@ def detect_phase(physics, last_action, z_rest, monitor=None, t=None):
         touch_l = touch_l or monitor.touched_recently("left", t)
         touch_r = touch_r or monitor.touched_recently("right", t)
     airborne = z_rest is not None and box[2] > z_rest + 0.02
-    if touch_l and (airborne or not touch_table):
+    if not airborne:
+        # cube on the table: always re-grasp, even if the right fingers touch it and are
+        # commanded closed (a fumbled/stalled grasp looks exactly like that)
+        return "pick"
+    if touch_l:
         return "handover"
-    right_cmd_closed = last_action is not None and float(last_action[15]) < 0.5
-    if touch_r and (airborne or not touch_table or right_cmd_closed):
-        return "carry"
-    if airborne:  # held, but by nobody we saw recently: the right arm carries by default
-        return "carry"
-    return "pick"
+    return "carry"  # airborne and not the left: the right arm holds it
 
 
 class TransferCubeRecoveryExpert:
@@ -104,6 +107,8 @@ class TransferCubeRecoveryExpert:
         phase = detect_phase(physics, last_action, z_rest, monitor=monitor, t=t0 - 1)
         if phase == "off_table":
             return None
+        if phase == "pick" and cube_pose(physics)[0] > WORKSPACE_X_MAX:
+            return None  # re-grasp impossible: cube outside the grasp workspace
 
         box = cube_pose(physics)[:3]
         ml, mr = obs["mocap_pose_left"], obs["mocap_pose_right"]

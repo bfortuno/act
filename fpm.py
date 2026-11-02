@@ -142,6 +142,9 @@ class TransferCubeFailureMonitor:
       missed_handover  the cube is lifted and held by the right arm only, and the left
                     gripper (which opened earlier) has closed past the cube width with no
                     left-finger contact: the left hand grabbed air at the handover
+      no_progress   (needs episode_len) the cube is still not lifted at the point of no
+                    return, episode_len - NO_RETURN_STEPS: even a full re-grasp can no
+                    longer finish in time (e.g. the learner hovers without ever touching)
       stalled_grasp the right fingers first touched the cube STALL_STEPS ago, but it was
                     never lifted and still sits on the table: a fumbled grasp that would
                     otherwise only end in a timeout. t_event = the first touch.
@@ -162,8 +165,13 @@ class TransferCubeFailureMonitor:
     CLOSED_ON_AIR = 0.45
     STALL_STEPS = 75  # 1.5s of touching without lifting (a clean grasp lifts in ~30)
 
-    def __init__(self, record=False):
+    # a full re-grasp (recovery_expert pick plan, ~310 steps at <=2x speed-up + margin)
+    # needs this many steps; if the cube is not lifted by episode_len - this, it is lost
+    NO_RETURN_STEPS = 170
+
+    def __init__(self, record=False, episode_len=None):
         self.record = record
+        self.lift_deadline = None if episode_len is None else episode_len - self.NO_RETURN_STEPS
         self.reset()
 
     def reset(self, physics=None):
@@ -224,6 +232,8 @@ class TransferCubeFailureMonitor:
         on_table = box[2] < self.z_rest + self.ON_TABLE_TOL
         if touch_r and on_table and not self.lifted and self.first_right_touch is None:
             self.first_right_touch = t
+        if not self.touched_recently("right", t, window=20):
+            self.first_right_touch = None  # let go for a while: a new attempt starts fresh
         cond = {
             "off_table": box[2] < self.z_rest - self.OFF_TABLE_DROP,
             "drop": self.lifted and on_table and not touch_l and not touch_r,
@@ -260,6 +270,9 @@ class TransferCubeFailureMonitor:
             and t - self.first_right_touch >= self.STALL_STEPS
         ):
             self.event, self.t_event = "stalled_grasp", self.first_right_touch
+            return self.event
+        if self.lift_deadline is not None and not self.lifted and t >= self.lift_deadline:
+            self.event, self.t_event = "no_progress", self.lift_deadline
             return self.event
         return None
 

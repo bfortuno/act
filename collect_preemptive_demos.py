@@ -168,7 +168,7 @@ def rollout(env, learner, fpm, args, T, task_name):
     ex = Executor(learner, T, args.temporal_agg, args.query_every)
     ts = env.reset()
     fpm.reset(env)
-    monitor = TransferCubeFailureMonitor(record=True)
+    monitor = TransferCubeFailureMonitor(record=True, episode_len=T)
     monitor.reset(env.physics)
 
     H, D = learner.num_queries, None
