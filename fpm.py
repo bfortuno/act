@@ -443,15 +443,27 @@ class PluginFPM(FailurePredictor):
         return float(np.clip(self.impl(ctx), 0.0, 1.0))
 
 
+class NullFPM(FailurePredictor):
+    """Scores nothing (always 0). For --trigger reactive, where the takeover is driven by
+    the failure monitor instead of a predictor."""
+
+    name = "none"
+
+    def __call__(self, ctx):
+        return 0.0
+
+
 def make_fpm(name, kwargs=None):
     kwargs = kwargs or {}
+    if name == "none":
+        return NullFPM()
     if name in ("oracle", "lookahead_oracle"):
         return LookaheadOracleFPM(**kwargs)
     if name in ("acc", "chunk_consistency"):
         return ChunkConsistencyFPM(**kwargs)
     if ":" in name:
         return PluginFPM(name, kwargs)
-    raise ValueError(f"unknown FPM {name!r} (oracle | acc | pkg.module:factory)")
+    raise ValueError(f"unknown FPM {name!r} (oracle | acc | none | pkg.module:factory)")
 
 
 # --------------------------------------------------------------------------------------

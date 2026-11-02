@@ -184,6 +184,25 @@ def rollout(env, learner, fpm, args, T, task_name):
     r_max = 0
 
     for t in range(T):
+        # reactive (standard) DAgger baseline: the expert takes over only AFTER the
+        # monitor has confirmed a failure, i.e. recovers from the failed state
+        if (
+            expert is None
+            and args.trigger == "reactive"
+            and not args.observe_only
+            and monitor.event is not None
+            and len(interventions) < args.max_interventions
+        ):
+            expert = TransferCubeRecoveryExpert.plan(
+                env.physics, ts.observation, last_action, t, T, monitor=monitor
+            )
+            info = {"trigger": "reactive", "event": monitor.event, "t_event": monitor.t_event}
+            if expert is None:
+                unrecoverable = True
+                interventions.append({"t0": t, "phase": "unrecoverable", **info})
+                break
+            interventions.append({**expert.describe(), **info})
+            expert_steps = 0
         if expert is None:
             action, queried = ex.step(t, ts)
             if queried:
@@ -217,6 +236,7 @@ def rollout(env, learner, fpm, args, T, task_name):
                     predictions.append({"t": t, "p": round(p, 4), **pred})
                 if (
                     not args.observe_only
+                    and args.trigger == "fpm"
                     and p > args.fpm_threshold
                     and len(interventions) < args.max_interventions
                     and monitor.event is None  # pre-emptive only: not after the failure
@@ -443,6 +463,7 @@ def main(args):
         "action_repr": learner.action_repr,
         "rot_repr": learner.rot_repr,
         "fpm": fpm.name,
+        "trigger": args.trigger,
         "fpm_threshold": float(args.fpm_threshold),
         "observe_only": bool(args.observe_only),
         "label_horizon": int(label_horizon),
@@ -531,7 +552,14 @@ if __name__ == "__main__":
         "--n_inference_steps", type=int, default=None, help="override diffusion/flow sampling steps"
     )
     # FPM gate
-    p.add_argument("--fpm", default="oracle", help="oracle | acc | pkg.module:factory")
+    p.add_argument("--fpm", default="oracle", help="oracle | acc | none | pkg.module:factory")
+    p.add_argument(
+        "--trigger",
+        choices=["fpm", "reactive"],
+        default="fpm",
+        help="fpm: pre-emptive takeover when p_hat > threshold (this method); reactive: "
+        "standard-DAgger baseline, takeover only after the monitor confirms a failure",
+    )
     p.add_argument("--fpm_kwargs", default=None, help="JSON kwargs for the FPM")
     p.add_argument(
         "--fpm_threshold",

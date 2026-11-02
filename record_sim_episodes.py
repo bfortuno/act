@@ -9,8 +9,6 @@ import numpy as np
 
 import ee_transforms
 from constants import (
-    CAMERA_HEIGHT,
-    CAMERA_WIDTH,
     PUPPET_GRIPPER_POSITION_NORMALIZE_FN,
     SIM_TASK_CONFIGS,
 )
@@ -103,9 +101,13 @@ def main(args):
     task_config = SIM_TASK_CONFIGS[task_name]
     episode_len = task_config["episode_len"]
     camera_names = task_config["camera_names"]
-    # resolution priority: CLI flag > per-task config > global default
-    camera_height = args.get("camera_height") or task_config.get("camera_height", CAMERA_HEIGHT)
-    camera_width = args.get("camera_width") or task_config.get("camera_width", CAMERA_WIDTH)
+    # resolution: CLI flag > per-task config > the env's own default. Only an explicit size
+    # is forwarded, so checkouts whose envs render a fixed size (no camera kwargs) work too.
+    cam_kw = {}
+    for k in ("camera_height", "camera_width"):
+        v = args.get(k) or task_config.get(k)
+        if v is not None:
+            cam_kw[k] = v
     if task_name == "sim_transfer_cube_scripted":
         policy_cls = PickAndTransferPolicy
     elif task_name == "sim_insertion_scripted":
@@ -118,7 +120,7 @@ def main(args):
         print(f"{episode_idx=}")
         print("Rollout out EE space scripted policy")
         # setup the environment
-        env = make_ee_sim_env(task_name, camera_height=camera_height, camera_width=camera_width)
+        env = make_ee_sim_env(task_name, **cam_kw)
         ts = env.reset()
         episode = [ts]
         policy = policy_cls(inject_noise)
@@ -175,7 +177,7 @@ def main(args):
 
         # setup the environment
         print("Replaying joint commands")
-        env = make_sim_env(task_name, camera_height=camera_height, camera_width=camera_width)
+        env = make_sim_env(task_name, **cam_kw)
         BOX_POSE[0] = (
             subtask_info  # make sure the sim_env has the same object configurations as ee_sim_env
         )
@@ -289,14 +291,14 @@ if __name__ == "__main__":
         action="store",
         type=int,
         default=None,
-        help=f"rendered image height (default: per-task config or {CAMERA_HEIGHT})",
+        help="rendered image height (default: per-task config, else the env default)",
     )
     parser.add_argument(
         "--camera_width",
         action="store",
         type=int,
         default=None,
-        help=f"rendered image width (default: per-task config or {CAMERA_WIDTH})",
+        help="rendered image width (default: per-task config, else the env default)",
     )
     parser.add_argument(
         "--task_space",

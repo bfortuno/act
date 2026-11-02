@@ -87,9 +87,9 @@ slide on the cube never fires; `tau_fail` is the first step of that streak:
 - `stalled_grasp`: the right fingers first touched the cube 75 steps ago, but it was never lifted
   and is still on the table (a fumbled grasp that would otherwise only end in a timeout). `tau_fail`
   is the first touch; the timer resets once the right fingers have been off the cube for 20 steps.
-- `no_progress`: the cube is still not lifted at the point of no return, `episode_len - 170`
-  (step 230 for 400-step episodes). After that even a full re-grasp by the expert cannot finish in
-  time. Catches a learner that hovers without ever touching the cube.
+- `no_progress`: the cube is still not lifted at the point of no return, `episode_len - 170` (step
+  230 for 400-step episodes). After that even a full re-grasp by the expert cannot finish in time.
+  Catches a learner that hovers without ever touching the cube.
 
 FPM labels follow the env's success criterion: a rollout the env counts as successful is never
 labelled as failing, even if the monitor latched an event (the event stays in the attrs).
@@ -140,6 +140,55 @@ canonical absolute poses), plus:
 
 `--observe_only` runs save every complete rollout, including failures: this is the FPM training set.
 Collection runs save, by default, only episodes that were intervened and then succeeded (`--save`).
+
+## Experiment: pre-emptive vs reactive DAgger
+
+Four arms, all retrained from the same base demos with **identical training flags** (use the exact
+command of the baseline run) and evaluated on the same seeded cube sequence (`eval_bc_task_space`
+calls `set_seed(1000)`):
+
+| Arm                   | Training data                                                      | Tests                      |
+| --------------------- | ------------------------------------------------------------------ | -------------------------- |
+| A. baseline           | base demos only (the existing checkpoint)                          | reference                  |
+| B. pre-emptive DAgger | base + FPM-triggered recoveries (`--trigger fpm`)                  | the method                 |
+| C. reactive DAgger    | base + recoveries started after the failure (`--trigger reactive`) | standard DAgger            |
+| D. more-data control  | base + the same number of extra scripted demos                     | rules out "just more data" |
+
+Fix the cube range (`utils.sample_box_pose`) **before** collecting and keep it for every arm's
+collection and evaluation. With the scripted grasp, x must stay at or below 0.25.
+
+```bash
+CKPT=outputs/<baseline_run>      # arm A
+BASE=data/ts                     # its training demos (N_BASE episodes)
+
+# B / C: collect recoveries with the baseline learner (same seed => same cubes)
+uv run python collect_preemptive_demos.py --ckpt_dir $CKPT --dataset_dir runs/rec_fpm \
+    --trigger fpm --fpm oracle --fpm_threshold 0 --num_rollouts 300 --seed 1
+uv run python collect_preemptive_demos.py --ckpt_dir $CKPT --dataset_dir runs/rec_reactive \
+    --trigger reactive --fpm none --num_rollouts 300 --seed 1
+
+# D: extra clean scripted demos on the same cube range
+uv run python record_sim_episodes.py --task_name sim_transfer_cube_scripted --task_space \
+    --dataset_dir runs/extra_scripted --num_episodes 150
+
+# equal budget: K = min(#episodes in rec_fpm, rec_reactive, extra_scripted)
+uv run python merge_datasets.py --out data/arm_B --src $BASE runs/rec_fpm:K
+uv run python merge_datasets.py --out data/arm_C --src $BASE runs/rec_reactive:K
+uv run python merge_datasets.py --out data/arm_D --src $BASE runs/extra_scripted:K
+
+# retrain each arm with the baseline's flags (only dataset/size/ckpt dir change)
+uv run python imitate_episodes.py <baseline flags> --dataset_dir data/arm_B \
+    --num_episodes $((N_BASE + K)) --ckpt_dir outputs/arm_B      # same for C, D
+
+# evaluate every arm on the same 100 cubes
+for ARM in $CKPT outputs/arm_B outputs/arm_C outputs/arm_D; do
+  uv run python imitate_episodes.py <baseline flags> --eval --ckpt_dir $ARM --num_rollouts 100
+done
+```
+
+Report success rate (and reward ≥ 1/2/3 from `result_policy_best.txt`) per arm. B > C at equal K is
+the claim; B > D shows it is the recovery data, not the amount. Also report the collection cost per
+arm: rollouts, interventions and rescued episodes, from `collect_summary.json`.
 
 ## Caveats
 
